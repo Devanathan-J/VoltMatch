@@ -2,7 +2,7 @@
     {
         "id": "iqoo_z6",
         "name": "iQOO Z6 44W",
-        "manufacturer": "iQOO",
+        "manufacturer": "iQOO / Vivo",
         "category": "phone",
         "connector": "USB-C",
         "isVerified": true,
@@ -24,6 +24,62 @@
         ]
     },
     {
+        "id": "iqoo_neo_9_pro",
+        "name": "iQOO Neo 9 Pro (120W)",
+        "manufacturer": "iQOO / Vivo",
+        "category": "phone",
+        "connector": "USB-C",
+        "isVerified": true,
+        "recommendedPower": 120.0,
+        "minPower": 18.0,
+        "acceptedProfiles": [
+            {
+                "voltage": 5.0,
+                "maxCurrent": 2.0
+            },
+            {
+                "voltage": 9.0,
+                "maxCurrent": 2.0
+            },
+            {
+                "voltage": 11.0,
+                "maxCurrent": 6.0
+            },
+            {
+                "voltage": 20.0,
+                "maxCurrent": 6.0
+            }
+        ]
+    },
+    {
+        "id": "vivo_v30_pro",
+        "name": "Vivo V30 / V40 Pro (80W)",
+        "manufacturer": "iQOO / Vivo",
+        "category": "phone",
+        "connector": "USB-C",
+        "isVerified": true,
+        "recommendedPower": 80.0,
+        "minPower": 18.0,
+        "acceptedProfiles": [
+            {
+                "voltage": 5.0,
+                "maxCurrent": 2.0
+            },
+            {
+                "voltage": 9.0,
+                "maxCurrent": 2.0
+            },
+            {
+                "voltage": 11.0,
+                "maxCurrent": 4.0
+            },
+            {
+                "voltage": 11.0,
+                "maxCurrent": 7.3
+            }
+        ]
+    },
+    {
         "id": "samsung_a21s",
         "name": "Samsung Galaxy A21s",
         "manufacturer": "Samsung",
@@ -40,6 +96,398 @@
             {
                 "voltage": 9.0,
                 "maxCurrent": 1.67
+            }
+        ]
+    },
+    {
+        "id": "samsung_a55",
+        "name": "Samsung Galaxy A55 / A35 (25W)",
+        "manufacturer": "Samsung",
+        "category": "phone",
+        "connector": "USB-C",
+        "isVerified": true,
+        "recommendedPower": 25.0,
+        "minPower": 15.0,
+        "acceptedProfiles": [
+            {
+                "voltage": 5.0,
+                "maxCurrent": 3.0
+            },
+            {
+                "voltage": 9.0,
+                "maxCurrent": 2.77
+            }
+        ]
+    },
+    {
+        "id": "samsung_s24_ultra",
+        "name": "Samsung Galaxy S24 Ultra / Plus (45W)",
+        "manufacturer": "Samsung",
+        "category": "phone",
+        "connector": "USB-C",
+        "isVerified": true,
+        "recommendedPower": 45.0,
+        "minPower": 15.0,
+        "acceptedProfiles": [
+            {
+                "voltage": 5.0,
+                "maxCurrent": 3.0
+            },
+            {
+                "voltage": 9.0,
+                "maxCurrent": 3.0
+            },
+            {
+                "voltage": 15.0,
+                "maxCurrent": 3.0
+            },
+            {
+                "voltage": 20.0,
+                "maxCurrent": 2.25
+            }
+        ]
+    },
+    {
+        "id": "samsung_s24_base",
+        "name": "Samsung Galaxy S24 / S23 (25W)",
+        "manufacturer": "Samsung",
+        "category": "phone",
+        "connector": "USB-C",
+        "isVerified": true,
+        "recommendedPower": 25.0,
+        "minPower": 15.0,
+        "acceptedProfiles": [
+            {
+                "voltage": 5.0,
+                "maxCurrent": 3.0
+            },
+            {
+                "voltage": 9.0,
+                "maxCurrent": 2.77
+            }
+        ]
+    },
+    {
+        "id": "iphone_15_base",
+        "name": "Apple iPhone 15 / 15 Plus (20W)",
+        "manufacturer": "Apple",
+        "category": "phone",
+        "connector": "USB-C",
+        "isVerified": true,
+        "recommendedPower": 20.0,
+        "minPower": 12.0,
+        "acceptedProfiles": [
+            {
+                "voltage": 5.0,
+                "maxCurrent": 3.0
+            },
+            {
+                "voltage": 9.0,
+                "maxCurrent": 2.22
+            }
+        ]
+    },
+    {
+        "id": "iphone_15_16_pro",
+        "name": "Apple iPhone 15 Pro / 16 Pro (27W)",
+        "manufacturer": "Apple",
+        "category": "phone",
+        "connector": "USB-C",
+        "isVerified": true,
+        "recommendedPower": 27.0,
+        "minPower": 15.0,
+        "acceptedProfiles": [
+            {
+                "voltage": 5.0,
+                "maxCurrent": 3.0
+            },
+            {
+                "voltage": 9.0,
+                "maxCurrent": 3.0
+            },
+            {
+                "voltage": 15.0,
+                "maxCurrent": 2.0
+            }
+        ]
+    },
+    {
+        "id": "oneplus_12",
+        "name": "OnePlus 12 / 12R (100W)",
+        "manufacturer": "OnePlus",
+        "category": "phone",
+        "connector": "USB-C",
+        "isVerified": true,
+        "recommendedPower": 100.0,
+        "minPower": 18.0,
+        "acceptedProfiles": [
+            {
+                "voltage": 5.0,
+                "maxCurrent": 2.0
+            },
+            {
+                "voltage": 9.0,
+                "maxCurrent": 2.0
+            },
+            {
+                "voltage": 11.0,
+                "maxCurrent": 7.3
+            },
+            {
+                "voltage": 11.0,
+                "maxCurrent": 9.1
+            }
+        ]
+    },
+    {
+        "id": "oneplus_nord_ce4",
+        "name": "OnePlus Nord CE 4 (100W)",
+        "manufacturer": "OnePlus",
+        "category": "phone",
+        "connector": "USB-C",
+        "isVerified": true,
+        "recommendedPower": 100.0,
+        "minPower": 18.0,
+        "acceptedProfiles": [
+            {
+                "voltage": 5.0,
+                "maxCurrent": 2.0
+            },
+            {
+                "voltage": 11.0,
+                "maxCurrent": 9.1
+            }
+        ]
+    },
+    {
+        "id": "xiaomi_14",
+        "name": "Xiaomi 14 / 13 Pro (90W - 120W)",
+        "manufacturer": "Xiaomi / Redmi",
+        "category": "phone",
+        "connector": "USB-C",
+        "isVerified": true,
+        "recommendedPower": 90.0,
+        "minPower": 18.0,
+        "acceptedProfiles": [
+            {
+                "voltage": 5.0,
+                "maxCurrent": 3.0
+            },
+            {
+                "voltage": 9.0,
+                "maxCurrent": 3.0
+            },
+            {
+                "voltage": 20.0,
+                "maxCurrent": 4.5
+            }
+        ]
+    },
+    {
+        "id": "redmi_note_13_pro",
+        "name": "Redmi Note 13 Pro (67W)",
+        "manufacturer": "Xiaomi / Redmi",
+        "category": "phone",
+        "connector": "USB-C",
+        "isVerified": true,
+        "recommendedPower": 67.0,
+        "minPower": 18.0,
+        "acceptedProfiles": [
+            {
+                "voltage": 5.0,
+                "maxCurrent": 3.0
+            },
+            {
+                "voltage": 11.0,
+                "maxCurrent": 6.1
+            }
+        ]
+    },
+    {
+        "id": "pixel_9_pro",
+        "name": "Google Pixel 9 / 9 Pro (27W - 37W)",
+        "manufacturer": "Google",
+        "category": "phone",
+        "connector": "USB-C",
+        "isVerified": true,
+        "recommendedPower": 30.0,
+        "minPower": 15.0,
+        "acceptedProfiles": [
+            {
+                "voltage": 5.0,
+                "maxCurrent": 3.0
+            },
+            {
+                "voltage": 9.0,
+                "maxCurrent": 3.0
+            },
+            {
+                "voltage": 15.0,
+                "maxCurrent": 2.0
+            }
+        ]
+    },
+    {
+        "id": "nothing_phone_2a",
+        "name": "Nothing Phone (2a) / Phone (2) (45W)",
+        "manufacturer": "Nothing",
+        "category": "phone",
+        "connector": "USB-C",
+        "isVerified": true,
+        "recommendedPower": 45.0,
+        "minPower": 18.0,
+        "acceptedProfiles": [
+            {
+                "voltage": 5.0,
+                "maxCurrent": 3.0
+            },
+            {
+                "voltage": 9.0,
+                "maxCurrent": 3.0
+            },
+            {
+                "voltage": 15.0,
+                "maxCurrent": 3.0
+            }
+        ]
+    },
+    {
+        "id": "moto_edge_50",
+        "name": "Motorola Edge 50 Pro (68W - 125W)",
+        "manufacturer": "Motorola",
+        "category": "phone",
+        "connector": "USB-C",
+        "isVerified": true,
+        "recommendedPower": 68.0,
+        "minPower": 20.0,
+        "acceptedProfiles": [
+            {
+                "voltage": 5.0,
+                "maxCurrent": 3.0
+            },
+            {
+                "voltage": 9.0,
+                "maxCurrent": 3.0
+            },
+            {
+                "voltage": 15.0,
+                "maxCurrent": 3.0
+            },
+            {
+                "voltage": 20.0,
+                "maxCurrent": 3.4
+            }
+        ]
+    },
+    {
+        "id": "macbook_air_m2",
+        "name": "Apple MacBook Air (M1 / M2 / M3)",
+        "manufacturer": "Laptops",
+        "category": "laptop",
+        "connector": "USB-C",
+        "isVerified": true,
+        "recommendedPower": 35.0,
+        "minPower": 30.0,
+        "acceptedProfiles": [
+            {
+                "voltage": 5.0,
+                "maxCurrent": 3.0
+            },
+            {
+                "voltage": 9.0,
+                "maxCurrent": 3.0
+            },
+            {
+                "voltage": 15.0,
+                "maxCurrent": 3.0
+            },
+            {
+                "voltage": 20.0,
+                "maxCurrent": 1.75
+            }
+        ]
+    },
+    {
+        "id": "macbook_pro_14",
+        "name": "Apple MacBook Pro 14-inch (M2 / M3)",
+        "manufacturer": "Laptops",
+        "category": "laptop",
+        "connector": "USB-C",
+        "isVerified": true,
+        "recommendedPower": 70.0,
+        "minPower": 45.0,
+        "acceptedProfiles": [
+            {
+                "voltage": 5.0,
+                "maxCurrent": 3.0
+            },
+            {
+                "voltage": 9.0,
+                "maxCurrent": 3.0
+            },
+            {
+                "voltage": 15.0,
+                "maxCurrent": 3.0
+            },
+            {
+                "voltage": 20.0,
+                "maxCurrent": 3.5
+            }
+        ]
+    },
+    {
+        "id": "dell_xps_13",
+        "name": "Dell XPS 13 / Inspiron",
+        "manufacturer": "Laptops",
+        "category": "laptop",
+        "connector": "USB-C",
+        "isVerified": true,
+        "recommendedPower": 65.0,
+        "minPower": 45.0,
+        "acceptedProfiles": [
+            {
+                "voltage": 5.0,
+                "maxCurrent": 3.0
+            },
+            {
+                "voltage": 9.0,
+                "maxCurrent": 3.0
+            },
+            {
+                "voltage": 15.0,
+                "maxCurrent": 3.0
+            },
+            {
+                "voltage": 20.0,
+                "maxCurrent": 3.25
+            }
+        ]
+    },
+    {
+        "id": "lenovo_thinkpad",
+        "name": "Lenovo ThinkPad / IdeaPad (65W)",
+        "manufacturer": "Laptops",
+        "category": "laptop",
+        "connector": "USB-C",
+        "isVerified": true,
+        "recommendedPower": 65.0,
+        "minPower": 45.0,
+        "acceptedProfiles": [
+            {
+                "voltage": 5.0,
+                "maxCurrent": 3.0
+            },
+            {
+                "voltage": 9.0,
+                "maxCurrent": 3.0
+            },
+            {
+                "voltage": 15.0,
+                "maxCurrent": 3.0
+            },
+            {
+                "voltage": 20.0,
+                "maxCurrent": 3.25
             }
         ]
     }

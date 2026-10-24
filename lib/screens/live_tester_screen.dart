@@ -15,15 +15,15 @@ class _LiveTesterScreenState extends State<LiveTesterScreen> {
 
   double currentMA = 0.0;
   double voltageV = 0.0;
+  double tempC = 0.0;
+  double maxWatts = 0.0;
   bool isCharging = false;
   bool hasDataConnection = false;
 
   @override
   void initState() {
     super.initState();
-    _timer = Timer.periodic(const Duration(seconds: 1), (timer) {
-      _fetchHardwareStats();
-    });
+    _timer = Timer.periodic(const Duration(seconds: 1), (_) => _fetchHardwareStats());
     _fetchHardwareStats();
   }
 
@@ -35,17 +35,33 @@ class _LiveTesterScreenState extends State<LiveTesterScreen> {
 
   Future<void> _fetchHardwareStats() async {
     try {
-      final Map<dynamic, dynamic> result =
-          await platform.invokeMethod('getLivePowerStats');
+      final Map<dynamic, dynamic> res = await platform.invokeMethod('getLivePowerStats');
       if (mounted) {
+        final charging = res['isCharging'] as bool;
+        final cMA = (res['currentMA'] as num).toDouble();
+        final vV = (res['voltageV'] as num).toDouble();
+
         setState(() {
-          currentMA = (result['currentMA'] as num).toDouble();
-          voltageV = (result['voltageV'] as num).toDouble();
-          isCharging = result['isCharging'] as bool;
-          hasDataConnection = result['hasDataConnection'] as bool;
+          isCharging = charging;
+          voltageV = vV;
+          tempC = (res['tempC'] as num).toDouble();
+          maxWatts = (res['maxChargingWatts'] as num).toDouble();
+          hasDataConnection = res['hasDataConnection'] as bool;
+
+          if (!charging) {
+            currentMA = 0.0;
+          } else {
+            currentMA = cMA;
+          }
         });
       }
     } catch (_) {}
+  }
+
+  Color _getTempColor() {
+    if (tempC < 36.0) return const Color(0xFF2ECC91); // Cool / Optimal
+    if (tempC < 41.0) return const Color(0xFFF5B544); // Warm
+    return const Color(0xFFEF6464); // Thermal Throttling
   }
 
   @override
@@ -53,16 +69,14 @@ class _LiveTesterScreenState extends State<LiveTesterScreen> {
     final liveWatts = (voltageV * (currentMA / 1000.0));
 
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Live Meter & Cable Tester'),
-      ),
+      appBar: AppBar(title: const Text('Live Meter & Cable Tester')),
       body: Center(
         child: ConstrainedBox(
           constraints: const BoxConstraints(maxWidth: 550),
           child: ListView(
             padding: const EdgeInsets.all(20),
             children: [
-              // Main Speed Gauge Card
+              // 1. Live Speed Gauge Card
               Container(
                 padding: const EdgeInsets.all(24),
                 decoration: BoxDecoration(
@@ -75,6 +89,25 @@ class _LiveTesterScreenState extends State<LiveTesterScreen> {
                 ),
                 child: Column(
                   children: [
+                    if (maxWatts > 0 && isCharging) ...[
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF3DDDB5).withOpacity(0.15),
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(color: const Color(0xFF3DDDB5).withOpacity(0.3)),
+                        ),
+                        child: Text(
+                          '⚡ Charger Negotiated Ceiling: ${maxWatts.toStringAsFixed(0)}W',
+                          style: const TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.bold,
+                            color: Color(0xFF3DDDB5),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                    ],
                     Icon(
                       isCharging ? Icons.bolt : Icons.power_off,
                       size: 46,
@@ -100,9 +133,85 @@ class _LiveTesterScreenState extends State<LiveTesterScreen> {
                 ),
               ),
 
+              const SizedBox(height: 14),
+
+              // 2. Hardware Telemetry Bar (Temperature & Data Wire)
+              Row(
+                children: [
+                  Expanded(
+                    child: Container(
+                      padding: const EdgeInsets.all(14),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF161D23),
+                        borderRadius: BorderRadius.circular(14),
+                        border: Border.all(color: Colors.white10),
+                      ),
+                      child: Row(
+                        children: [
+                          Icon(Icons.thermostat, color: _getTempColor(), size: 22),
+                          const SizedBox(width: 8),
+                          Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Text('Battery Temp', style: TextStyle(fontSize: 11, color: Colors.grey)),
+                              Text(
+                                '${tempC.toStringAsFixed(1)} °C',
+                                style: TextStyle(
+                                  fontSize: 15,
+                                  fontWeight: FontWeight.bold,
+                                  color: _getTempColor(),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Container(
+                      padding: const EdgeInsets.all(14),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF161D23),
+                        borderRadius: BorderRadius.circular(14),
+                        border: Border.all(color: Colors.white10),
+                      ),
+                      child: Row(
+                        children: [
+                          Icon(
+                            hasDataConnection ? Icons.usb : Icons.usb_off,
+                            color: hasDataConnection ? const Color(0xFF2ECC91) : Colors.orangeAccent,
+                            size: 22,
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                const Text('Data Lines', style: TextStyle(fontSize: 11, color: Colors.grey)),
+                                Text(
+                                  hasDataConnection ? 'Verified' : 'Wall/No PC',
+                                  maxLines: 1,
+                                  style: TextStyle(
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.bold,
+                                    color: hasDataConnection ? const Color(0xFF2ECC91) : Colors.orangeAccent,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+
               const SizedBox(height: 16),
 
-              // FLASH7W: Smart Contextual Notice (shows if charging between 5W and 14W)
+              // 3. Contextual Notice
               if (isCharging && liveWatts > 0 && liveWatts < 15) ...[
                 Container(
                   padding: const EdgeInsets.all(14),
@@ -117,7 +226,7 @@ class _LiveTesterScreenState extends State<LiveTesterScreen> {
                       SizedBox(width: 12),
                       Expanded(
                         child: Text(
-                          'Showing ~7W - 13W? This is normal if your screen is ON or battery is over 80%. Read the guide below!',
+                          'Showing ~7W - 13W? Normal for screen-on or battery above 80%. Read below!',
                           style: TextStyle(
                             color: Color(0xFFF5B544),
                             fontSize: 13,
@@ -131,55 +240,7 @@ class _LiveTesterScreenState extends State<LiveTesterScreen> {
                 const SizedBox(height: 16),
               ],
 
-              // Data Wire Inspection Card
-              Container(
-                padding: const EdgeInsets.all(18),
-                decoration: BoxDecoration(
-                  color: const Color(0xFF161D23),
-                  borderRadius: BorderRadius.circular(16),
-                  border: Border.all(color: Colors.white12),
-                ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Row(
-                      children: [
-                        Icon(Icons.usb, color: Color(0xFF3DDDB5), size: 20),
-                        SizedBox(width: 8),
-                        Text(
-                          'Cable Data Wire Check',
-                          style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 10),
-                    Row(
-                      children: [
-                        Icon(
-                          hasDataConnection ? Icons.check_circle : Icons.help_outline,
-                          color: hasDataConnection ? const Color(0xFF2ECC91) : Colors.orangeAccent,
-                          size: 18,
-                        ),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: Text(
-                            hasDataConnection
-                                ? 'Data Wires Active (Connected to PC/Host)'
-                                : isCharging
-                                    ? 'Plugged into Wall Charger (or Charge-Only wire)'
-                                    : 'Connect cable to PC/Laptop to test data lines',
-                            style: const TextStyle(fontSize: 13, color: Colors.white70),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
-              ),
-
-              const SizedBox(height: 20),
-
-              // FLASH7W: 4-Point Educational Guide & Troubleshooter
+              // 4. In-App Troubleshooting Guide
               Container(
                 decoration: BoxDecoration(
                   color: const Color(0xFF161D23),
@@ -187,11 +248,11 @@ class _LiveTesterScreenState extends State<LiveTesterScreen> {
                   border: Border.all(color: Colors.white12),
                 ),
                 child: ExpansionTile(
-                  initiallyExpanded: true,
+                  initiallyExpanded: false,
                   shape: const Border(),
                   leading: const Icon(Icons.help_outline, color: Color(0xFF22BFA2)),
                   title: const Text(
-                    'Why is my Wattage lower than advertised?',
+                    'Why is Wattage lower than advertised?',
                     style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold),
                   ),
                   children: [
@@ -199,41 +260,23 @@ class _LiveTesterScreenState extends State<LiveTesterScreen> {
                       padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
                       child: Column(
                         children: [
-                          _buildExplainerPoint(
-                            icon: Icons.stay_current_portrait,
-                            title: '1. The Screen-On Thermal Brake',
-                            description:
-                                'To prevent dangerous heat, almost all phones cut charging speed down to ~7W – 10W the moment the screen is turned ON. Full 44W+ charging only occurs when the screen is locked and OFF.',
-                          ),
-                          const Divider(color: Colors.white10, height: 24),
-                          _buildExplainerPoint(
-                            icon: Icons.battery_charging_full,
-                            title: '2. The 70%-80% Battery Saturation Rule',
-                            description:
-                                'Fast charging only runs at full blast when your battery is low (0% to 50%). Once your battery reaches 80%+, the phone intentionally trickles power (~10W to 13W) to prevent overheating and protect battery health.',
-                          ),
-                          const Divider(color: Colors.white10, height: 24),
-                          _buildExplainerPoint(
-                            icon: Icons.text_fields,
-                            title: '3. "FlashCharge" vs "Fast Charging"',
-                            description:
-                                'Check your lock screen text when you plug in:\n• If it says "FlashCharge" / "SuperVOOC", you are on the 44W+ circuit.\n• If it only says "Fast charging", it is running at standard 15W/18W speed.',
-                          ),
-                          const Divider(color: Colors.white10, height: 24),
-                          _buildExplainerPoint(
-                            icon: Icons.cable,
-                            title: '4. Cable Capability',
-                            description:
-                                'High-speed 44W+ charging requires a specialized thick cable rated for 4A. A normal 2A cable forces the phone to throttle down to safe 10W-15W speeds.',
-                          ),
+                          _buildPoint(Icons.stay_current_portrait, '1. Screen-On Thermal Brake',
+                              'Phones cut speed to ~7W-10W while the screen is on. Full speed occurs only when the screen is locked and OFF.'),
+                          const Divider(color: Colors.white10, height: 20),
+                          _buildPoint(Icons.battery_charging_full, '2. The 70%-80% Battery Rule',
+                              'Fast charging only runs full blast below 60%. Above 80%, power trickles down to protect battery life.'),
+                          const Divider(color: Colors.white10, height: 20),
+                          _buildPoint(Icons.thermostat, '3. Battery Temperature',
+                              'If your battery warms above 38°C, the phone automatically dials back charging power to cool itself.'),
+                          const Divider(color: Colors.white10, height: 20),
+                          _buildPoint(Icons.cable, '4. Cable Rating',
+                              'Standard 2A cables bottleneck fast chargers down to 10W-15W. High-power charging requires a 4A/5A cable.'),
                         ],
                       ),
                     ),
                   ],
                 ),
               ),
-
-              const SizedBox(height: 24),
             ],
           ),
         ),
@@ -241,37 +284,19 @@ class _LiveTesterScreenState extends State<LiveTesterScreen> {
     );
   }
 
-  Widget _buildExplainerPoint({
-    required IconData icon,
-    required String title,
-    required String description,
-  }) {
+  Widget _buildPoint(IconData icon, String title, String desc) {
     return Row(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Icon(icon, size: 20, color: const Color(0xFF3DDDB5)),
-        const SizedBox(width: 12),
+        Icon(icon, size: 18, color: const Color(0xFF3DDDB5)),
+        const SizedBox(width: 10),
         Expanded(
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(
-                title,
-                style: const TextStyle(
-                  fontWeight: FontWeight.bold,
-                  fontSize: 14,
-                  color: Colors.white,
-                ),
-              ),
-              const SizedBox(height: 4),
-              Text(
-                description,
-                style: const TextStyle(
-                  color: Color(0xFFA7B0B9),
-                  fontSize: 12.5,
-                  height: 1.4,
-                ),
-              ),
+              Text(title, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: Colors.white)),
+              const SizedBox(height: 2),
+              Text(desc, style: const TextStyle(color: Color(0xFFA7B0B9), fontSize: 12, height: 1.3)),
             ],
           ),
         ),

@@ -22,6 +22,8 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
   double currentMA = 0.0;
   double voltageV = 0.0;
   double liveWatts = 0.0;
+  double tempC = 0.0;
+  double maxWatts = 0.0;
   int batteryPct = 0;
   bool isCharging = false;
 
@@ -46,8 +48,7 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
 
   Future<void> _fetchStats() async {
     try {
-      final Map<dynamic, dynamic> res =
-          await platform.invokeMethod('getLivePowerStats');
+      final Map<dynamic, dynamic> res = await platform.invokeMethod('getLivePowerStats');
       if (mounted) {
         final charging = res['isCharging'] as bool;
         final cMA = (res['currentMA'] as num).toDouble();
@@ -57,8 +58,9 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
           isCharging = charging;
           voltageV = vV;
           batteryPct = res['batteryPct'] as int;
+          tempC = (res['tempC'] as num).toDouble();
+          maxWatts = (res['maxChargingWatts'] as num).toDouble();
 
-          // FIX: If unplugged, zero out discharge current so it doesn't show 0.2W - 1.1W
           if (!charging) {
             currentMA = 0.0;
             liveWatts = 0.0;
@@ -81,8 +83,7 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
       broadcastUrl = 'http://$ip:8080';
     });
 
-    _metricsTimer =
-        Timer.periodic(const Duration(seconds: 1), (_) => _fetchStats());
+    _metricsTimer = Timer.periodic(const Duration(seconds: 1), (_) => _fetchStats());
 
     _server!.listen((HttpRequest req) {
       req.response.headers.add('Access-Control-Allow-Origin', '*');
@@ -95,6 +96,8 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
             'currentMA': currentMA,
             'voltageV': voltageV,
             'batteryPct': batteryPct,
+            'tempC': tempC,
+            'maxChargingWatts': maxWatts,
             'isCharging': isCharging,
           }))
           ..close();
@@ -115,10 +118,11 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
       setState(() {
         isBroadcasting = false;
         broadcastUrl = '';
-        // FIX: Reset live numbers when broadcast stops
         liveWatts = 0.0;
         currentMA = 0.0;
         voltageV = 0.0;
+        tempC = 0.0;
+        maxWatts = 0.0;
         isCharging = false;
       });
     }
@@ -131,11 +135,6 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
       SnackBar(
         content: Text('Copied link: $broadcastUrl'),
         backgroundColor: const Color(0xFF22BFA2),
-        action: SnackBarAction(
-          label: 'OK',
-          textColor: Colors.black,
-          onPressed: () {},
-        ),
       ),
     );
   }
@@ -146,64 +145,153 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
 <html>
 <head>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>VoltMatch Remote Monitor</title>
+  <title>VoltMatch Remote Telemetry</title>
   <style>
-    body { background: #101419; color: #fff; font-family: sans-serif; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; text-align: center; }
-    .card { background: #1C252C; padding: 32px; border-radius: 20px; border: 2px solid #22BFA2; width: 90%; max-width: 400px; box-shadow: 0 8px 30px rgba(0,0,0,0.5); transition: all 0.3s ease; }
-    .watts { font-size: 54px; font-weight: bold; color: #22BFA2; margin: 16px 0; }
-    .stats { color: #A7B0B9; font-size: 16px; line-height: 1.6; }
+    body { background: #101419; color: #fff; font-family: -apple-system, BlinkMacSystemFont, sans-serif; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; padding: 16px; box-sizing: border-box; }
+    .card { background: #1C252C; padding: 24px; border-radius: 24px; border: 2px solid #22BFA2; width: 100%; max-width: 440px; box-shadow: 0 10px 40px rgba(0,0,0,0.6); text-align: center; }
     .badge { background: rgba(34,191,162,0.15); color: #22BFA2; padding: 6px 14px; border-radius: 20px; font-weight: bold; font-size: 13px; display: inline-block; margin-bottom: 8px; }
+    .ceiling { font-size: 12px; color: #3DDDB5; font-weight: bold; margin-bottom: 4px; }
+    .watts { font-size: 56px; font-weight: 800; color: #22BFA2; margin: 8px 0; letter-spacing: -1px; }
+    .stats { color: #A7B0B9; font-size: 15px; line-height: 1.5; margin-bottom: 16px; }
+    .alert-banner { display: none; background: rgba(245,181,68,0.2); border: 1px solid #F5B544; color: #F5B544; padding: 10px; border-radius: 12px; font-size: 13px; font-weight: bold; margin-bottom: 14px; }
+    canvas { width: 100%; height: 100px; background: #101419; border-radius: 12px; border: 1px solid rgba(255,255,255,0.06); margin-top: 10px; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 14px; text-align: left; }
+    .pill { background: #161D23; padding: 10px 14px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.05); }
+    .pill-label { font-size: 11px; color: #7F8A96; }
+    .pill-value { font-size: 14px; font-weight: bold; margin-top: 2px; }
   </style>
 </head>
 <body>
-  <div class="card" id="card">
+  <div class="card">
+    <div id="alert80" class="alert-banner">🔔 80% REACHED! Ready to unplug to protect battery.</div>
     <div class="badge" id="badge">Connecting...</div>
+    <div class="ceiling" id="ceiling"></div>
     <div class="watts" id="w">-- W</div>
-    <div class="stats" id="info">Waiting for probe...</div>
+    <div class="stats" id="info">Waiting for probe data...</div>
+
+    <!-- Live Scrolling Wattage Chart -->
+    <canvas id="chart" width="400" height="120"></canvas>
+
+    <div class="grid">
+      <div class="pill">
+        <div class="pill-label">Battery Level</div>
+        <div class="pill-value" id="bat">--%</div>
+      </div>
+      <div class="pill">
+        <div class="pill-label">Battery Temp</div>
+        <div class="pill-value" id="temp">-- °C</div>
+      </div>
+    </div>
   </div>
+
   <script>
+    let history = new Array(30).fill(0);
+    let alerted80 = false;
+
+    function play80Chime() {
+      try {
+        const ctx = new (window.AudioContext || window.webkitAudioContext)();
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.frequency.setValueAtTime(587.33, ctx.currentTime);
+        osc.frequency.setValueAtTime(880, ctx.currentTime + 0.15);
+        gain.gain.setValueAtTime(0.3, ctx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.6);
+        osc.start();
+        osc.stop(ctx.currentTime + 0.6);
+      } catch(e) {}
+    }
+
+    function drawChart() {
+      const cvs = document.getElementById('chart');
+      const ctx = cvs.getContext('2d');
+      const w = cvs.width;
+      const h = cvs.height;
+      ctx.clearRect(0, 0, w, h);
+
+      const maxVal = Math.max(20, ...history) * 1.15;
+      
+      // Draw grid line
+      ctx.strokeStyle = 'rgba(255,255,255,0.05)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(0, h/2); ctx.lineTo(w, h/2);
+      ctx.stroke();
+
+      // Draw Watt curve
+      ctx.strokeStyle = '#22BFA2';
+      ctx.lineWidth = 2.5;
+      ctx.beginPath();
+      for (let i = 0; i < history.length; i++) {
+        const x = (i / (history.length - 1)) * w;
+        const y = h - ((history[i] / maxVal) * (h - 12)) - 6;
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+    }
+
     async function update() {
       try {
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 2000);
+        const timeout = setTimeout(() => controller.abort(), 2000);
         const res = await fetch('/api/stats', { signal: controller.signal });
-        clearTimeout(timeoutId);
+        clearTimeout(timeout);
 
         if (!res.ok) throw new Error();
-        const data = await res.json();
-        
-        // FIX: Handle Not Charging cleanly (0.0 W)
-        if (!data.isCharging) {
+        const d = await res.json();
+
+        history.push(d.isCharging ? d.watts : 0);
+        history.shift();
+        drawChart();
+
+        // 80% Smart Alert
+        if (d.batteryPct >= 80 && d.isCharging && !alerted80) {
+          alerted80 = true;
+          document.getElementById('alert80').style.display = 'block';
+          play80Chime();
+        }
+
+        document.getElementById('bat').innerText = d.batteryPct + '%';
+        const tempEl = document.getElementById('temp');
+        tempEl.innerText = d.tempC.toFixed(1) + ' °C';
+        tempEl.style.color = d.tempC > 40 ? '#EF6464' : (d.tempC > 36 ? '#F5B544' : '#2ECC91');
+
+        if (d.maxChargingWatts > 0) {
+          document.getElementById('ceiling').innerText = '⚡ Hardware Ceiling: ' + Math.round(d.maxChargingWatts) + 'W';
+        } else {
+          document.getElementById('ceiling').innerText = '';
+        }
+
+        if (!d.isCharging) {
           document.getElementById('badge').innerText = 'Unplugged / Idle';
           document.getElementById('badge').style.color = '#A7B0B9';
           document.getElementById('badge').style.background = 'rgba(255,255,255,0.1)';
           document.getElementById('w').innerText = '0.0 W';
           document.getElementById('w').style.color = '#A7B0B9';
-          document.getElementById('info').innerHTML =
-            'Battery: <b>' + data.batteryPct + '%</b> • <span style="color:#EF6464">Not Charging</span>';
+          document.getElementById('info').innerHTML = '<span style="color:#EF6464">Not Charging</span>';
         } else {
           document.getElementById('badge').innerText = 'Screen-OFF Remote Probe';
           document.getElementById('badge').style.color = '#22BFA2';
           document.getElementById('badge').style.background = 'rgba(34,191,162,0.15)';
-          document.getElementById('w').innerText = data.watts.toFixed(1) + ' W';
+          document.getElementById('w').innerText = d.watts.toFixed(1) + ' W';
           document.getElementById('w').style.color = '#22BFA2';
-          document.getElementById('info').innerHTML = 
-            '<b>' + Math.round(data.currentMA) + ' mA</b> • ' + data.voltageV.toFixed(2) + ' V<br>' +
-            'Battery: <b>' + data.batteryPct + '%</b> • <span style="color:#2ECC91">⚡ Charging</span>';
+          document.getElementById('info').innerHTML = '<b>' + Math.round(d.currentMA) + ' mA</b> • ' + d.voltageV.toFixed(2) + ' V';
         }
       } catch(e) {
-        // FIX: When broadcast is stopped, immediately show disconnected!
         document.getElementById('badge').innerText = 'Disconnected';
         document.getElementById('badge').style.color = '#EF6464';
         document.getElementById('badge').style.background = 'rgba(239,100,100,0.15)';
         document.getElementById('w').innerText = '-- W';
         document.getElementById('w').style.color = '#A7B0B9';
-        document.getElementById('info').innerHTML = 
-          '<span style="color:#EF6464; font-weight:bold;">Broadcast Stopped</span><br><span style="font-size:13px;">Tap Start on your phone to resume</span>';
+        document.getElementById('info').innerHTML = '<span style="color:#EF6464; font-weight:bold;">Broadcast Stopped</span>';
       }
     }
+
     setInterval(update, 1000);
-    update();
+    drawChart();
   </script>
 </body>
 </html>
@@ -220,53 +308,40 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
           child: ListView(
             padding: const EdgeInsets.all(24),
             children: [
-              // Broadcaster Status Card
               Container(
                 padding: const EdgeInsets.all(24),
                 decoration: BoxDecoration(
                   color: const Color(0xFF1C252C),
                   borderRadius: BorderRadius.circular(20),
                   border: Border.all(
-                    color: isBroadcasting
-                        ? const Color(0xFF22BFA2)
-                        : Colors.white12,
+                    color: isBroadcasting ? const Color(0xFF22BFA2) : Colors.white12,
                     width: 2,
                   ),
                 ),
                 child: Column(
                   children: [
                     Icon(
-                      isBroadcasting
-                          ? Icons.wifi_tethering
-                          : Icons.wifi_tethering_off,
+                      isBroadcasting ? Icons.wifi_tethering : Icons.wifi_tethering_off,
                       size: 48,
-                      color: isBroadcasting
-                          ? const Color(0xFF22BFA2)
-                          : Colors.grey,
+                      color: isBroadcasting ? const Color(0xFF22BFA2) : Colors.grey,
                     ),
                     const SizedBox(height: 12),
                     Text(
-                      isBroadcasting
-                          ? 'Broadcaster Active'
-                          : 'Broadcaster Stopped',
-                      style: const TextStyle(
-                          fontSize: 20, fontWeight: FontWeight.bold),
+                      isBroadcasting ? 'Broadcaster Active' : 'Broadcaster Stopped',
+                      style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
                     ),
                     const SizedBox(height: 8),
                     Text(
                       isBroadcasting
-                          ? 'Now you can TURN OFF THIS SCREEN. Watch the live numbers on your other phone!'
+                          ? 'Now you can TURN OFF THIS SCREEN. Watch the live graph on your other phone!'
                           : 'Turn this phone into a remote probe to unlock full charging speed with the screen off.',
                       textAlign: TextAlign.center,
-                      style: const TextStyle(
-                          color: Color(0xFFA7B0B9), fontSize: 13),
+                      style: const TextStyle(color: Color(0xFFA7B0B9), fontSize: 13),
                     ),
                     if (isBroadcasting) ...[
                       const SizedBox(height: 18),
-                      // URL Display Box
                       Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 16, vertical: 12),
+                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
                         decoration: BoxDecoration(
                           color: const Color(0xFF101419),
                           borderRadius: BorderRadius.circular(12),
@@ -290,15 +365,12 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
                         ),
                       ),
                       const SizedBox(height: 12),
-                      // Share / Copy Link Button
                       ElevatedButton.icon(
                         style: ElevatedButton.styleFrom(
-                          backgroundColor:
-                              const Color(0xFF22BFA2).withOpacity(0.15),
+                          backgroundColor: const Color(0xFF22BFA2).withOpacity(0.15),
                           foregroundColor: const Color(0xFF22BFA2),
                           side: const BorderSide(color: Color(0xFF22BFA2)),
-                          shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(10)),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
                         ),
                         icon: const Icon(Icons.share, size: 18),
                         label: const Text('Copy / Share Link'),
@@ -308,22 +380,17 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
                   ],
                 ),
               ),
-
               const SizedBox(height: 24),
-
-              // Action Buttons
               if (!isBroadcasting)
                 ElevatedButton.icon(
                   style: ElevatedButton.styleFrom(
                     backgroundColor: const Color(0xFF22BFA2),
                     foregroundColor: Colors.black,
                     minimumSize: const Size.fromHeight(52),
-                    shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(12)),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                   ),
                   icon: const Icon(Icons.play_arrow),
-                  label: const Text('Start Screen-Off Broadcaster',
-                      style: TextStyle(fontWeight: FontWeight.bold)),
+                  label: const Text('Start Screen-Off Broadcaster', style: TextStyle(fontWeight: FontWeight.bold)),
                   onPressed: _startBroadcast,
                 )
               else
@@ -332,76 +399,12 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
                     backgroundColor: const Color(0xFFEF6464),
                     foregroundColor: Colors.white,
                     minimumSize: const Size.fromHeight(52),
-                    shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(12)),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                   ),
                   icon: const Icon(Icons.stop),
-                  label: const Text('Stop Broadcaster',
-                      style: TextStyle(fontWeight: FontWeight.bold)),
+                  label: const Text('Stop Broadcaster', style: TextStyle(fontWeight: FontWeight.bold)),
                   onPressed: _stopBroadcast,
                 ),
-
-              const SizedBox(height: 32),
-
-              // Instructions Card
-              Container(
-                padding: const EdgeInsets.all(20),
-                decoration: BoxDecoration(
-                  color: const Color(0xFF161D23),
-                  borderRadius: BorderRadius.circular(16),
-                  border: Border.all(color: Colors.white10),
-                ),
-                child: const Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      children: [
-                        Icon(Icons.directions_run,
-                            color: Color(0xFF3DDDB5), size: 20),
-                        SizedBox(width: 8),
-                        Text('How to run this test:',
-                            style: TextStyle(
-                                fontWeight: FontWeight.bold, fontSize: 15)),
-                      ],
-                    ),
-                    SizedBox(height: 12),
-                    Text(
-                        '1. Connect both phones to the same Wi-Fi (or turn on Hotspot on one and connect the other).',
-                        style: TextStyle(
-                            color: Color(0xFFA7B0B9),
-                            fontSize: 13,
-                            height: 1.4)),
-                    SizedBox(height: 6),
-                    Text('2. Tap "Start Screen-Off Broadcaster" above.',
-                        style: TextStyle(
-                            color: Color(0xFFA7B0B9),
-                            fontSize: 13,
-                            height: 1.4)),
-                    SizedBox(height: 6),
-                    Text(
-                        '3. Tap "Copy / Share Link" to send it or open it in Chrome on your other phone.',
-                        style: TextStyle(
-                            color: Color(0xFFA7B0B9),
-                            fontSize: 13,
-                            height: 1.4)),
-                    SizedBox(height: 6),
-                    Text(
-                        '4. Plug in your charger, then TURN OFF this screen with the power button!',
-                        style: TextStyle(
-                            color: Color(0xFF3DDDB5),
-                            fontSize: 13,
-                            height: 1.4,
-                            fontWeight: FontWeight.bold)),
-                    SizedBox(height: 6),
-                    Text(
-                        '5. Watch the numbers update live on your other phone without thermal throttling!',
-                        style: TextStyle(
-                            color: Color(0xFFA7B0B9),
-                            fontSize: 13,
-                            height: 1.4)),
-                  ],
-                ),
-              ),
             ],
           ),
         ),

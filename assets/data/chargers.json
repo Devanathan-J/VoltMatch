@@ -2,7 +2,7 @@
     {
         "id": "chg_iqoo_44w",
         "name": "iQOO / Vivo 44W FlashCharge Adapter",
-        "manufacturer": "iQOO",
+        "manufacturer": "iQOO / Vivo",
         "maxAdvertisedPower": 44.0,
         "isMultiport": false,
         "isVerified": true,
@@ -22,6 +22,32 @@
         ]
     },
     {
+        "id": "chg_iqoo_120w",
+        "name": "iQOO / Vivo 120W FlashCharge Adapter",
+        "manufacturer": "iQOO / Vivo",
+        "maxAdvertisedPower": 120.0,
+        "isMultiport": false,
+        "isVerified": true,
+        "outputProfiles": [
+            {
+                "voltage": 5.0,
+                "maxCurrent": 2.0
+            },
+            {
+                "voltage": 9.0,
+                "maxCurrent": 2.0
+            },
+            {
+                "voltage": 11.0,
+                "maxCurrent": 6.0
+            },
+            {
+                "voltage": 20.0,
+                "maxCurrent": 6.0
+            }
+        ]
+    },
+    {
         "id": "chg_samsung_15w",
         "name": "Samsung 15W Adaptive Fast Charger",
         "manufacturer": "Samsung",
@@ -36,6 +62,350 @@
             {
                 "voltage": 9.0,
                 "maxCurrent": 1.67
+            }
+        ]
+    },
+    {
+        "id": "chg_samsung_25w",
+        "name": "Samsung 25W Super Fast Charger (EP-TA800)",
+        "manufacturer": "Samsung",
+        "maxAdvertisedPower": 25.0,
+        "isMultiport": false,
+        "isVerified": true,
+        "outputProfiles": [
+            {
+                "voltage": 5.0,
+                "maxCurrent": 3.0
+            },
+            {
+                "voltage": 9.0,
+                "maxCurrent": 2.77
+            }
+        ]
+    },
+    {
+        "id": "chg_samsung_45w",
+        "name": "Samsung 45W Super Fast Charger 2.0 (EP-T4510)",
+        "manufacturer": "Samsung",
+        "maxAdvertisedPower": 45.0,
+        "isMultiport": false,
+        "isVerified": true,
+        "outputProfiles": [
+            {
+                "voltage": 5.0,
+                "maxCurrent": 3.0
+            },
+            {
+                "voltage": 9.0,
+                "maxCurrent": 3.0
+            },
+            {
+                "voltage": 15.0,
+                "maxCurrent": 3.0
+            },
+            {
+                "voltage": 20.0,
+                "maxCurrent": 2.25
+            }
+        ]
+    },
+    {
+        "id": "chg_apple_20w",
+        "name": "Apple 20W USB-C Power Adapter",
+        "manufacturer": "Apple",
+        "maxAdvertisedPower": 20.0,
+        "isMultiport": false,
+        "isVerified": true,
+        "outputProfiles": [
+            {
+                "voltage": 5.0,
+                "maxCurrent": 3.0
+            },
+            {
+                "voltage": 9.0,
+                "maxCurrent": 2.22
+            }
+        ]
+    },
+    {
+        "id": "chg_apple_30w",
+        "name": "Apple 30W USB-C Power Adapter",
+        "manufacturer": "Apple",
+        "maxAdvertisedPower": 30.0,
+        "isMultiport": false,
+        "isVerified": true,
+        "outputProfiles": [
+            {
+                "voltage": 5.0,
+                "maxCurrent": 3.0
+            },
+            {
+                "voltage": 9.0,
+                "maxCurrent": 3.0
+            },
+            {
+                "voltage": 15.0,
+                "maxCurrent": 2.0
+            },
+            {
+                "voltage": 20.0,
+                "maxCurrent": 1.5
+            }
+        ]
+    },
+    {
+        "id": "chg_apple_70w",
+        "name": "Apple 70W USB-C Power Adapter (MacBook)",
+        "manufacturer": "Apple",
+        "maxAdvertisedPower": 70.0,
+        "isMultiport": false,
+        "isVerified": true,
+        "outputProfiles": [
+            {
+                "voltage": 5.0,
+                "maxCurrent": 3.0
+            },
+            {
+                "voltage": 9.0,
+                "maxCurrent": 3.0
+            },
+            {
+                "voltage": 15.0,
+                "maxCurrent": 3.0
+            },
+            {
+                "voltage": 20.0,
+                "maxCurrent": 3.5
+            }
+        ]
+    },
+    {
+        "id": "chg_anker_30w",
+        "name": "Anker 511 Nano 30W GaN",
+        "manufacturer": "Anker",
+        "maxAdvertisedPower": 30.0,
+        "isMultiport": false,
+        "isVerified": true,
+        "outputProfiles": [
+            {
+                "voltage": 5.0,
+                "maxCurrent": 3.0
+            },
+            {
+                "voltage": 9.0,
+                "maxCurrent": 3.0
+            },
+            {
+                "voltage": 15.0,
+                "maxCurrent": 2.0
+            },
+            {
+                "voltage": 20.0,
+                "maxCurrent": 1.5
+            }
+        ]
+    },
+    {
+        "id": "chg_anker_65w",
+        "name": "Anker 735 Nano II 65W GaN (3-Port)",
+        "manufacturer": "Anker",
+        "maxAdvertisedPower": 65.0,
+        "isMultiport": true,
+        "isVerified": true,
+        "outputProfiles": [
+            {
+                "voltage": 5.0,
+                "maxCurrent": 3.0
+            },
+            {
+                "voltage": 9.0,
+                "maxCurrent": 3.0
+            },
+            {
+                "voltage": 15.0,
+                "maxCurrent": 3.0
+            },
+            {
+                "voltage": 20.0,
+                "maxCurrent": 3.25
+            }
+        ]
+    },
+    {
+        "id": "chg_anker_100w",
+        "name": "Anker Prime 100W GaN Charger",
+        "manufacturer": "Anker",
+        "maxAdvertisedPower": 100.0,
+        "isMultiport": true,
+        "isVerified": true,
+        "outputProfiles": [
+            {
+                "voltage": 5.0,
+                "maxCurrent": 3.0
+            },
+            {
+                "voltage": 9.0,
+                "maxCurrent": 3.0
+            },
+            {
+                "voltage": 15.0,
+                "maxCurrent": 3.0
+            },
+            {
+                "voltage": 20.0,
+                "maxCurrent": 5.0
+            }
+        ]
+    },
+    {
+        "id": "chg_ugreen_65w",
+        "name": "Ugreen Nexode 65W GaN (3-Port)",
+        "manufacturer": "Ugreen",
+        "maxAdvertisedPower": 65.0,
+        "isMultiport": true,
+        "isVerified": true,
+        "outputProfiles": [
+            {
+                "voltage": 5.0,
+                "maxCurrent": 3.0
+            },
+            {
+                "voltage": 9.0,
+                "maxCurrent": 3.0
+            },
+            {
+                "voltage": 15.0,
+                "maxCurrent": 3.0
+            },
+            {
+                "voltage": 20.0,
+                "maxCurrent": 3.25
+            }
+        ]
+    },
+    {
+        "id": "chg_cmf_65w",
+        "name": "CMF by Nothing Power 65W GaN (3-Port)",
+        "manufacturer": "Nothing / CMF",
+        "maxAdvertisedPower": 65.0,
+        "isMultiport": true,
+        "isVerified": true,
+        "outputProfiles": [
+            {
+                "voltage": 5.0,
+                "maxCurrent": 3.0
+            },
+            {
+                "voltage": 9.0,
+                "maxCurrent": 3.0
+            },
+            {
+                "voltage": 15.0,
+                "maxCurrent": 3.0
+            },
+            {
+                "voltage": 20.0,
+                "maxCurrent": 3.25
+            }
+        ]
+    },
+    {
+        "id": "chg_oneplus_100w",
+        "name": "OnePlus 100W Dual-Port SuperVOOC",
+        "manufacturer": "OnePlus",
+        "maxAdvertisedPower": 100.0,
+        "isMultiport": true,
+        "isVerified": true,
+        "outputProfiles": [
+            {
+                "voltage": 5.0,
+                "maxCurrent": 2.0
+            },
+            {
+                "voltage": 11.0,
+                "maxCurrent": 7.3
+            },
+            {
+                "voltage": 11.0,
+                "maxCurrent": 9.1
+            }
+        ]
+    },
+    {
+        "id": "chg_xiaomi_67w",
+        "name": "Xiaomi 67W SonicCharge Adapter",
+        "manufacturer": "Xiaomi / Redmi",
+        "maxAdvertisedPower": 67.0,
+        "isMultiport": false,
+        "isVerified": true,
+        "outputProfiles": [
+            {
+                "voltage": 5.0,
+                "maxCurrent": 3.0
+            },
+            {
+                "voltage": 9.0,
+                "maxCurrent": 3.0
+            },
+            {
+                "voltage": 11.0,
+                "maxCurrent": 6.1
+            },
+            {
+                "voltage": 20.0,
+                "maxCurrent": 3.25
+            }
+        ]
+    },
+    {
+        "id": "chg_generic_65w_pd",
+        "name": "Standard / Generic 65W USB-PD Laptop Charger",
+        "manufacturer": "Standard USB-PD",
+        "maxAdvertisedPower": 65.0,
+        "isMultiport": false,
+        "isVerified": true,
+        "outputProfiles": [
+            {
+                "voltage": 5.0,
+                "maxCurrent": 3.0
+            },
+            {
+                "voltage": 9.0,
+                "maxCurrent": 3.0
+            },
+            {
+                "voltage": 15.0,
+                "maxCurrent": 3.0
+            },
+            {
+                "voltage": 20.0,
+                "maxCurrent": 3.25
+            }
+        ]
+    },
+    {
+        "id": "chg_generic_100w_pd",
+        "name": "Standard / Generic 100W USB-PD Adapter",
+        "manufacturer": "Standard USB-PD",
+        "maxAdvertisedPower": 100.0,
+        "isMultiport": false,
+        "isVerified": true,
+        "outputProfiles": [
+            {
+                "voltage": 5.0,
+                "maxCurrent": 3.0
+            },
+            {
+                "voltage": 9.0,
+                "maxCurrent": 3.0
+            },
+            {
+                "voltage": 15.0,
+                "maxCurrent": 3.0
+            },
+            {
+                "voltage": 20.0,
+                "maxCurrent": 5.0
             }
         ]
     }
