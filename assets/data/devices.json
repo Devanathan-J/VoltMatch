@@ -1,0 +1,46 @@
+[
+    {
+        "id": "iqoo_z6",
+        "name": "iQOO Z6 44W",
+        "manufacturer": "iQOO",
+        "category": "phone",
+        "connector": "USB-C",
+        "isVerified": true,
+        "recommendedPower": 44.0,
+        "minPower": 10.0,
+        "acceptedProfiles": [
+            {
+                "voltage": 5.0,
+                "maxCurrent": 2.0
+            },
+            {
+                "voltage": 9.0,
+                "maxCurrent": 2.0
+            },
+            {
+                "voltage": 11.0,
+                "maxCurrent": 4.0
+            }
+        ]
+    },
+    {
+        "id": "samsung_a21s",
+        "name": "Samsung Galaxy A21s",
+        "manufacturer": "Samsung",
+        "category": "phone",
+        "connector": "USB-C",
+        "isVerified": true,
+        "recommendedPower": 15.0,
+        "minPower": 10.0,
+        "acceptedProfiles": [
+            {
+                "voltage": 5.0,
+                "maxCurrent": 2.0
+            },
+            {
+                "voltage": 9.0,
+                "maxCurrent": 1.67
+            }
+        ]
+    }
+]

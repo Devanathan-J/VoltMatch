@@ -1,0 +1,42 @@
+[
+    {
+        "id": "chg_iqoo_44w",
+        "name": "iQOO / Vivo 44W FlashCharge Adapter",
+        "manufacturer": "iQOO",
+        "maxAdvertisedPower": 44.0,
+        "isMultiport": false,
+        "isVerified": true,
+        "outputProfiles": [
+            {
+                "voltage": 5.0,
+                "maxCurrent": 2.0
+            },
+            {
+                "voltage": 9.0,
+                "maxCurrent": 2.0
+            },
+            {
+                "voltage": 11.0,
+                "maxCurrent": 4.0
+            }
+        ]
+    },
+    {
+        "id": "chg_samsung_15w",
+        "name": "Samsung 15W Adaptive Fast Charger",
+        "manufacturer": "Samsung",
+        "maxAdvertisedPower": 15.0,
+        "isMultiport": false,
+        "isVerified": true,
+        "outputProfiles": [
+            {
+                "voltage": 5.0,
+                "maxCurrent": 2.0
+            },
+            {
+                "voltage": 9.0,
+                "maxCurrent": 1.67
+            }
+        ]
+    }
+]
