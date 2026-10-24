@@ -14,21 +14,28 @@ class RemoteMonitorScreen extends StatefulWidget {
 class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
   static const platform = MethodChannel('com.voltmatch/hardware');
 
-  // Mode: true = Central Hub, false = Remote Probe
   bool isHostMode = true;
-  bool enable80AlertSound = true; // Two-way synced sound toggle
-
+  bool enable80AlertSound = true;
   bool isRunning = false;
+  bool showManualIpInput = false;
+
   String broadcastUrl = '';
   String cachedLocalIp = '127.0.0.1';
   final TextEditingController hubIpController = TextEditingController();
   final TextEditingController nicknameController = TextEditingController();
 
+  // Auto-Discovery
+  bool isSearchingForHub = false;
+  String? discoveredHubName;
+  String? discoveredHubIp;
+  RawDatagramSocket? _udpBeaconSocket;
+  RawDatagramSocket? _udpListenSocket;
+  Timer? _beaconTimer;
+
   HttpServer? _server;
   Timer? _fastTimer;
   HttpClient? _probeClient;
 
-  // Multi-device telemetry repository on the Hub
   final Map<String, Map<String, dynamic>> _connectedDevices = {};
 
   // Self telemetry
@@ -44,12 +51,17 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
   @override
   void initState() {
     super.initState();
-    _resolveLocalIp();
+    _resolveLocalIp().then((_) {
+      if (!isHostMode) {
+        _startAutoDiscovery();
+      }
+    });
   }
 
   @override
   void dispose() {
     _stopSession();
+    _stopDiscovery();
     hubIpController.dispose();
     nicknameController.dispose();
     super.dispose();
@@ -69,6 +81,129 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
       }
     } catch (_) {}
   }
+
+  // ─────────────────────────────────────────────────────────────
+  // AUTO-DISCOVERY ENGINE
+  // ─────────────────────────────────────────────────────────────
+
+  Future<void> _startUdpBeacon() async {
+    try {
+      _udpBeaconSocket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
+      _udpBeaconSocket?.broadcastEnabled = true;
+
+      _beaconTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+        if (!isRunning || !isHostMode) return;
+        final effectiveName = nicknameController.text.trim().isNotEmpty
+            ? nicknameController.text.trim()
+            : deviceName;
+
+        final msg = utf8.encode(json.encode({
+          'type': 'VOLTMATCH_HUB',
+          'ip': cachedLocalIp,
+          'name': effectiveName,
+        }));
+        _udpBeaconSocket?.send(msg, InternetAddress('255.255.255.255'), 8082);
+      });
+    } catch (_) {}
+  }
+
+  Future<void> _startAutoDiscovery() async {
+    if (isRunning) return;
+    setState(() {
+      isSearchingForHub = true;
+      discoveredHubIp = null;
+      discoveredHubName = null;
+    });
+
+    try {
+      _udpListenSocket = await RawDatagramSocket.bind(
+        InternetAddress.anyIPv4,
+        8082,
+        reuseAddress: true,
+        reusePort: true,
+      );
+      _udpListenSocket?.listen((RawSocketEvent event) {
+        if (event == RawSocketEvent.read) {
+          final datagram = _udpListenSocket?.receive();
+          if (datagram != null) {
+            try {
+              final str = utf8.decode(datagram.data);
+              final data = json.decode(str) as Map<String, dynamic>;
+              if (data['type'] == 'VOLTMATCH_HUB' && data['ip'] != null) {
+                _onHubFound(data['ip'], data['name'] ?? 'VoltMatch Hub');
+              }
+            } catch (_) {}
+          }
+        }
+      });
+    } catch (_) {}
+
+    _scanSubnetForHub();
+  }
+
+  Future<void> _scanSubnetForHub() async {
+    if (cachedLocalIp == '127.0.0.1') return;
+    final parts = cachedLocalIp.split('.');
+    if (parts.length != 4) return;
+    final subnet = '${parts[0]}.${parts[1]}.${parts[2]}';
+
+    final client = HttpClient()..connectionTimeout = const Duration(milliseconds: 350);
+
+    const chunkSize = 40;
+    for (int i = 1; i <= 254; i += chunkSize) {
+      if (discoveredHubIp != null || !mounted || !isSearchingForHub) break;
+      final futures = <Future>[];
+      for (int j = i; j < i + chunkSize && j <= 254; j++) {
+        final target = '$subnet.$j';
+        if (target == cachedLocalIp) continue;
+
+        futures.add(() async {
+          try {
+            final req = await client.getUrl(Uri.parse('http://$target:8080/api/discover'));
+            final res = await req.close();
+            if (res.statusCode == HttpStatus.ok) {
+              final body = await utf8.decoder.bind(res).join();
+              final data = json.decode(body) as Map<String, dynamic>;
+              if (data['hub'] == true) {
+                _onHubFound(target, data['name'] ?? 'VoltMatch Hub');
+              }
+            }
+          } catch (_) {}
+        }());
+      }
+      await Future.wait(futures);
+    }
+    client.close(force: true);
+
+    if (mounted && discoveredHubIp == null) {
+      setState(() {
+        isSearchingForHub = false;
+      });
+    }
+  }
+
+  void _onHubFound(String ip, String name) {
+    if (!mounted || discoveredHubIp != null) return;
+    setState(() {
+      discoveredHubIp = ip;
+      discoveredHubName = name;
+      hubIpController.text = ip;
+      isSearchingForHub = false;
+    });
+    _stopDiscovery();
+  }
+
+  void _stopDiscovery() {
+    _beaconTimer?.cancel();
+    _udpBeaconSocket?.close();
+    _udpListenSocket?.close();
+    _udpBeaconSocket = null;
+    _udpListenSocket = null;
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // TELEMETRY SAMPLING
+  // ─────────────────────────────────────────────────────────────
 
   Future<void> _fetchSelfStats() async {
     try {
@@ -117,8 +252,9 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
     } catch (_) {}
   }
 
-  // START: Host Central Hub
+  // START: Host
   Future<void> _startHost() async {
+    _stopDiscovery();
     await _resolveLocalIp();
     await platform.invokeMethod('acquireWakeLock');
 
@@ -127,6 +263,8 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
       isRunning = true;
       broadcastUrl = 'http://$cachedLocalIp:8080';
     });
+
+    _startUdpBeacon();
 
     _fastTimer = Timer.periodic(const Duration(milliseconds: 300), (_) {
       _fetchSelfStats();
@@ -144,7 +282,20 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
         return;
       }
 
-      if (req.uri.path == '/api/stats') {
+      if (req.uri.path == '/api/discover') {
+        final effectiveName = nicknameController.text.trim().isNotEmpty
+            ? nicknameController.text.trim()
+            : deviceName;
+
+        req.response
+          ..headers.contentType = ContentType.json
+          ..write(json.encode({
+            'hub': true,
+            'ip': cachedLocalIp,
+            'name': effectiveName,
+          }))
+          ..close();
+      } else if (req.uri.path == '/api/stats') {
         final list = _connectedDevices.values.toList();
         req.response
           ..headers.contentType = ContentType.json
@@ -154,7 +305,6 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
           }))
           ..close();
       } else if (req.uri.path == '/api/set-sound' && req.method == 'POST') {
-        // Two-way sync: browser changes sound setting
         try {
           final body = await utf8.decoder.bind(req).join();
           final data = json.decode(body) as Map<String, dynamic>;
@@ -202,16 +352,20 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
     _connectedDevices.removeWhere((key, val) => key != 'self' && (now - (val['lastSeen'] as int)) > 5000);
   }
 
-  // START: Join as Remote Probe
+  // START: Probe
   Future<void> _startProbe() async {
+    _stopDiscovery();
+
     var targetIp = hubIpController.text.trim();
-    // Automatically cleans "http://", "https://", and ":8080" if pasted!
     targetIp = targetIp.replaceAll('http://', '').replaceAll('https://', '');
-    if (targetIp.contains(':')) {
-      targetIp = targetIp.split(':')[0];
-    }
-    if (targetIp.endsWith('/')) {
-      targetIp = targetIp.substring(0, targetIp.length - 1);
+    if (targetIp.contains(':')) targetIp = targetIp.split(':')[0];
+    if (targetIp.endsWith('/')) targetIp = targetIp.substring(0, targetIp.length - 1);
+
+    if (targetIp.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('No Hub selected or detected')),
+      );
+      return;
     }
 
     await platform.invokeMethod('acquireWakeLock');
@@ -219,7 +373,7 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
 
     setState(() {
       isRunning = true;
-      broadcastUrl = 'Streaming to http://$targetIp:8080';
+      broadcastUrl = 'Streaming to $targetIp';
     });
 
     final selfId = 'probe_${Platform.operatingSystem}_${cachedLocalIp.replaceAll('.', '_')}';
@@ -266,15 +420,19 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
         isCharging = false;
       });
     }
+
+    if (!isHostMode) {
+      _startAutoDiscovery();
+    }
   }
 
   void _copyLink() {
     if (broadcastUrl.isEmpty) return;
     Clipboard.setData(ClipboardData(text: broadcastUrl));
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text('Copied: $broadcastUrl'),
-        backgroundColor: const Color(0xFF22BFA2),
+      const SnackBar(
+        content: Text('Hub link copied! Open it in any browser.'),
+        backgroundColor: Color(0xFF22BFA2),
       ),
     );
   }
@@ -285,7 +443,7 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
 <html>
 <head>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>VoltMatch Multi-Device Dashboard</title>
+  <title>VoltMatch Telemetry</title>
   <style>
     :root {
       --bg: #101419;
@@ -304,35 +462,34 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
       color: var(--text);
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
       min-height: 100vh;
-      padding: 20px;
+      padding: 24px 20px;
       display: flex;
       flex-direction: column;
       align-items: center;
     }
     header {
       width: 100%;
-      max-width: 1300px;
+      max-width: 1200px;
       display: flex;
       justify-content: space-between;
       align-items: center;
       margin-bottom: 24px;
-      padding-bottom: 12px;
+      padding-bottom: 14px;
       border-bottom: 1px solid var(--card-border);
     }
     .brand { display: flex; align-items: center; gap: 10px; font-weight: 800; font-size: 20px; }
     .bolt { color: var(--accent); font-size: 24px; }
     .header-actions { display: flex; align-items: center; gap: 10px; }
     .status-badge {
-      background: rgba(34,191,162,0.15);
+      background: rgba(34,191,162,0.12);
       color: var(--accent);
       padding: 6px 14px;
       border-radius: 20px;
       font-size: 13px;
       font-weight: 600;
-      transition: all 0.3s ease;
     }
     .sound-btn {
-      background: rgba(255,255,255,0.08);
+      background: rgba(255,255,255,0.06);
       color: var(--text);
       border: 1px solid var(--card-border);
       padding: 6px 14px;
@@ -340,47 +497,38 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
       font-size: 12px;
       font-weight: 600;
       cursor: pointer;
-      transition: all 0.2s ease;
     }
-
     .grid {
       width: 100%;
-      max-width: 1300px;
+      max-width: 1200px;
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
-      gap: 18px;
-      transition: all 0.3s ease;
+      grid-template-columns: repeat(auto-fit, minmax(310px, 1fr));
+      gap: 16px;
     }
-    .grid.single-device { max-width: 480px; }
-
+    .grid.single-device { max-width: 440px; }
     .device-card {
       background: var(--card-bg);
       border-radius: 20px;
       border: 1.5px solid var(--card-border);
-      padding: 20px;
+      padding: 22px;
       display: flex;
       flex-direction: column;
       position: relative;
-      overflow: hidden;
-      box-shadow: 0 8px 32px rgba(0,0,0,0.4);
-      transition: all 0.2s ease;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.4);
     }
     .device-card.charging { border-color: rgba(34,191,162,0.35); }
-
     .card-top { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 12px; }
     .device-title { font-size: 16px; font-weight: 700; color: #fff; max-width: 70%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .device-status { font-size: 11px; font-weight: 700; padding: 4px 10px; border-radius: 12px; text-transform: uppercase; }
     .status-charging { background: rgba(46,204,145,0.15); color: #2ECC91; }
     .status-idle { background: rgba(255,255,255,0.08); color: var(--subtext); }
-
     .ceiling-tag { font-size: 11px; color: var(--accent-bright); font-weight: 600; margin-bottom: 2px; }
     .watts-display { font-size: 46px; font-weight: 800; color: var(--accent); letter-spacing: -1px; line-height: 1; margin: 6px 0; }
     .watts-display.idle { color: var(--subtext); }
     .elec-specs { font-size: 13px; color: var(--subtext); margin-bottom: 14px; }
-
     .chart-container {
       width: 100%;
-      height: 70px;
+      height: 65px;
       background: rgba(0,0,0,0.25);
       border-radius: 10px;
       overflow: hidden;
@@ -388,12 +536,10 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
       border: 1px solid rgba(255,255,255,0.03);
     }
     canvas { width: 100%; height: 100%; display: block; }
-
     .stats-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: auto; }
     .pill { background: rgba(0,0,0,0.2); border-radius: 10px; padding: 8px 12px; border: 1px solid rgba(255,255,255,0.03); }
     .pill-label { font-size: 11px; color: var(--subtext); }
     .pill-val { font-size: 14px; font-weight: 700; margin-top: 2px; }
-
     .alert-80-badge {
       background: rgba(245,181,68,0.2);
       border: 1px solid var(--warn);
@@ -404,10 +550,7 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
       border-radius: 10px;
       margin-bottom: 10px;
       text-align: center;
-      animation: pulse 1.5s infinite;
     }
-    @keyframes pulse { 0% { opacity: 0.8; } 50% { opacity: 1; } 100% { opacity: 0.8; } }
-
     .disconnect-card {
       background: var(--card-bg);
       border-radius: 20px;
@@ -415,19 +558,15 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
       padding: 40px 24px;
       text-align: center;
       grid-column: 1 / -1;
-      max-width: 480px;
+      max-width: 440px;
       margin: 40px auto;
-      box-shadow: 0 10px 40px rgba(0,0,0,0.6);
     }
-    .no-devices { text-align: center; padding: 60px 20px; color: var(--subtext); font-size: 16px; grid-column: 1 / -1; }
+    .no-devices { text-align: center; padding: 60px 20px; color: var(--subtext); font-size: 15px; grid-column: 1 / -1; }
   </style>
 </head>
 <body>
   <header>
-    <div class="brand">
-      <span class="bolt">⚡</span>
-      <span>VoltMatch Monitor Hub</span>
-    </div>
+    <div class="brand"><span class="bolt">⚡</span><span>VoltMatch</span></div>
     <div class="header-actions">
       <button id="sound-toggle" class="sound-btn" onclick="toggleSound()">🔔 Sound: ON</button>
       <div class="status-badge" id="hub-count">Connecting...</div>
@@ -435,7 +574,7 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
   </header>
 
   <div class="grid" id="devices-grid">
-    <div class="no-devices">Connecting to VoltMatch Central Hub...</div>
+    <div class="no-devices">Searching for connected devices...</div>
   </div>
 
   <script>
@@ -449,11 +588,9 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
       const btn = document.getElementById('sound-toggle');
       if (!btn) return;
       btn.innerText = enabled ? '🔔 Sound: ON' : '🔕 Sound: OFF';
-      btn.style.borderColor = enabled ? 'var(--accent)' : 'rgba(255,255,255,0.15)';
       btn.style.color = enabled ? 'var(--accent-bright)' : 'var(--subtext)';
     }
 
-    // Two-Way Sync: User clicks in the browser
     async function toggleSound() {
       const newState = !soundEnabled;
       soundEnabled = newState;
@@ -470,23 +607,16 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
         soundEnabled = d.soundEnabled;
         updateSoundUi(soundEnabled);
       } catch(e) {}
-      
-      // Release sync lock after 600ms
       setTimeout(() => { isSyncing = false; }, 600);
     }
 
     function playMildTing() {
       if (!soundEnabled) return;
       try {
-        if (!audioCtx) {
-          audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-        }
-        if (audioCtx.state === 'suspended') {
-          audioCtx.resume();
-        }
+        if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        if (audioCtx.state === 'suspended') audioCtx.resume();
         const now = audioCtx.currentTime;
 
-        // Mild high crystal bell tone (1760 Hz - A6)
         const osc1 = audioCtx.createOscillator();
         const gain1 = audioCtx.createGain();
         osc1.type = 'sine';
@@ -498,7 +628,6 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
         osc1.start(now);
         osc1.stop(now + 0.8);
 
-        // Gentle harmonic overtone (2637 Hz - E7)
         const osc2 = audioCtx.createOscillator();
         const gain2 = audioCtx.createGain();
         osc2.type = 'sine';
@@ -548,7 +677,6 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
         const payload = await res.json();
         const devices = payload.devices || [];
 
-        // Two-Way Sync: If phone changed the switch, browser updates instantly!
         if (!isSyncing && payload.soundEnabled !== undefined) {
           soundEnabled = payload.soundEnabled;
           updateSoundUi(soundEnabled);
@@ -556,9 +684,9 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
 
         const grid = document.getElementById('devices-grid');
         const badge = document.getElementById('hub-count');
-        badge.style.background = 'rgba(34,191,162,0.15)';
+        badge.style.background = 'rgba(34,191,162,0.12)';
         badge.style.color = '#22BFA2';
-        badge.innerText = devices.length + (devices.length === 1 ? ' Device Active' : ' Devices Active');
+        badge.innerText = devices.length + (devices.length === 1 ? ' Device' : ' Devices');
 
         if (devices.length <= 1) {
           grid.classList.add('single-device');
@@ -567,15 +695,13 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
         }
 
         if (devices.length === 0) {
-          grid.innerHTML = '<div class="no-devices">No active devices broadcasting on this hub.<br>Connect your phone and start streaming!</div>';
+          grid.innerHTML = '<div class="no-devices">No active devices broadcasting.<br>Connect your phone to stream live data.</div>';
           return;
         }
 
-        // Check if any device has 80%+ and is charging
         const has80Charging = devices.some(d => d.batteryPct >= 80 && d.isCharging);
         const now = Date.now();
         if (has80Charging && soundEnabled) {
-          // Mild chime every 10 seconds in the browser only!
           if (now - lastTingTime >= 10000) {
             lastTingTime = now;
             playMildTing();
@@ -595,7 +721,7 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
 
           html += `
             <div class="device-card \${isChg ? 'charging' : ''}">
-              \${isAt80 ? '<div class="alert-80-badge">🔔 80% Reached — Unplug Recommended!</div>' : ''}
+              \${isAt80 ? '<div class="alert-80-badge">🔔 80% Reached — Unplug Ready</div>' : ''}
               <div class="card-top">
                 <div class="device-title" title="\${d.name}">\${d.name}</div>
                 <div class="device-status \${statusCls}">\${statusText}</div>
@@ -604,9 +730,7 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
               <div class="watts-display \${isChg ? '' : 'idle'}">\${wText}</div>
               <div class="elec-specs">\${Math.round(d.currentMA)} mA • \${d.voltageV.toFixed(2)} V</div>
               
-              <div class="chart-container">
-                <canvas id="cvs_\${d.id}"></canvas>
-              </div>
+              <div class="chart-container"><canvas id="cvs_\${d.id}"></canvas></div>
 
               <div class="stats-row">
                 <div class="pill">
@@ -634,21 +758,17 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
         });
 
       } catch(e) {
-        // Instant Disconnect Card
         const grid = document.getElementById('devices-grid');
         const badge = document.getElementById('hub-count');
-        badge.innerText = 'Hub Disconnected';
+        badge.innerText = 'Offline';
         badge.style.background = 'rgba(239,100,100,0.15)';
         badge.style.color = '#EF6464';
 
         grid.innerHTML = `
           <div class="disconnect-card">
-            <div style="font-size: 42px; margin-bottom: 12px;">🛑</div>
-            <div style="font-size: 22px; font-weight: 800; color: #EF6464; margin-bottom: 8px;">Broadcast Stopped</div>
-            <div style="color: var(--subtext); font-size: 14px; line-height: 1.5;">
-              The phone has stopped broadcasting.<br>
-              Tap <b>Start</b> on your phone to resume live telemetry.
-            </div>
+            <div style="font-size: 38px; margin-bottom: 10px;">🛑</div>
+            <div style="font-size: 20px; font-weight: 800; color: #EF6464; margin-bottom: 6px;">Broadcast Stopped</div>
+            <div style="color: var(--subtext); font-size: 13px;">Tap Start on your phone to resume streaming.</div>
           </div>
         `;
       }
@@ -665,144 +785,267 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Multi-Device Charging Hub')),
+      appBar: AppBar(
+        title: const Text('Remote Monitor', style: TextStyle(fontWeight: FontWeight.bold)),
+      ),
       body: Center(
         child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 550),
+          constraints: const BoxConstraints(maxWidth: 500),
           child: ListView(
-            padding: const EdgeInsets.all(20),
+            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
             children: [
-              // MODE TOGGLE TABS
+              // Segmented Mode Switcher
               if (!isRunning)
                 Container(
                   margin: const EdgeInsets.only(bottom: 20),
                   padding: const EdgeInsets.all(4),
                   decoration: BoxDecoration(
                     color: const Color(0xFF161D23),
-                    borderRadius: BorderRadius.circular(12),
+                    borderRadius: BorderRadius.circular(14),
                     border: Border.all(color: Colors.white10),
                   ),
                   child: Row(
                     children: [
                       Expanded(
-                        child: ChoiceChip(
-                          label: const Center(child: Text('Central Hub (Host)')),
-                          selected: isHostMode,
-                          selectedColor: const Color(0xFF22BFA2),
-                          labelStyle: TextStyle(
-                            color: isHostMode ? Colors.black : Colors.white70,
-                            fontWeight: FontWeight.bold,
+                        child: GestureDetector(
+                          onTap: () {
+                            setState(() => isHostMode = true);
+                            _stopDiscovery();
+                          },
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(vertical: 10),
+                            decoration: BoxDecoration(
+                              color: isHostMode ? const Color(0xFF22BFA2) : Colors.transparent,
+                              borderRadius: BorderRadius.circular(10),
+                            ),
+                            child: Center(
+                              child: Text(
+                                'Central Hub',
+                                style: TextStyle(
+                                  color: isHostMode ? Colors.black : Colors.white70,
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 14,
+                                ),
+                              ),
+                            ),
                           ),
-                          onSelected: (val) => setState(() => isHostMode = true),
                         ),
                       ),
-                      const SizedBox(width: 4),
                       Expanded(
-                        child: ChoiceChip(
-                          label: const Center(child: Text('Join as Probe')),
-                          selected: !isHostMode,
-                          selectedColor: const Color(0xFF22BFA2),
-                          labelStyle: TextStyle(
-                            color: !isHostMode ? Colors.black : Colors.white70,
-                            fontWeight: FontWeight.bold,
+                        child: GestureDetector(
+                          onTap: () {
+                            setState(() => isHostMode = false);
+                            _startAutoDiscovery();
+                          },
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(vertical: 10),
+                            decoration: BoxDecoration(
+                              color: !isHostMode ? const Color(0xFF22BFA2) : Colors.transparent,
+                              borderRadius: BorderRadius.circular(10),
+                            ),
+                            child: Center(
+                              child: Text(
+                                'Join as Probe',
+                                style: TextStyle(
+                                  color: !isHostMode ? Colors.black : Colors.white70,
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 14,
+                                ),
+                              ),
+                            ),
                           ),
-                          onSelected: (val) => setState(() => isHostMode = false),
                         ),
                       ),
                     ],
                   ),
                 ),
 
-              // SETUP CARD
+              // PROBE MODE: Clean Auto-Discovery Radar Card
+              if (!isHostMode && !isRunning) ...[
+                Container(
+                  padding: const EdgeInsets.all(18),
+                  decoration: BoxDecoration(
+                    color: discoveredHubIp != null
+                        ? const Color(0xFF2ECC91).withOpacity(0.08)
+                        : const Color(0xFF161D23),
+                    borderRadius: BorderRadius.circular(18),
+                    border: Border.all(
+                      color: discoveredHubIp != null
+                          ? const Color(0xFF2ECC91).withOpacity(0.4)
+                          : Colors.white10,
+                    ),
+                  ),
+                  child: Row(
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.all(10),
+                        decoration: BoxDecoration(
+                          color: (discoveredHubIp != null
+                                  ? const Color(0xFF2ECC91)
+                                  : const Color(0xFF22BFA2))
+                              .withOpacity(0.15),
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: isSearchingForHub
+                            ? const SizedBox(
+                                width: 22,
+                                height: 22,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2.2,
+                                  color: Color(0xFF22BFA2),
+                                ),
+                              )
+                            : Icon(
+                                discoveredHubIp != null
+                                    ? Icons.check_circle_rounded
+                                    : Icons.wifi_tethering,
+                                color: discoveredHubIp != null
+                                    ? const Color(0xFF2ECC91)
+                                    : const Color(0xFF22BFA2),
+                                size: 22,
+                              ),
+                      ),
+                      const SizedBox(width: 14),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              discoveredHubIp != null
+                                  ? 'Hub Auto-Detected'
+                                  : isSearchingForHub
+                                      ? 'Scanning Wi-Fi...'
+                                      : 'No Hub Found',
+                              style: TextStyle(
+                                fontWeight: FontWeight.bold,
+                                fontSize: 14,
+                                color: discoveredHubIp != null
+                                    ? const Color(0xFF2ECC91)
+                                    : Colors.white,
+                              ),
+                            ),
+                            const SizedBox(height: 3),
+                            Text(
+                              discoveredHubIp != null
+                                  ? '$discoveredHubName ($discoveredHubIp)'
+                                  : 'Start Central Hub on Phone 1 first.',
+                              style: const TextStyle(
+                                fontSize: 12,
+                                color: Color(0xFFA7B0B9),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      if (!isSearchingForHub && discoveredHubIp == null)
+                        IconButton(
+                          icon: const Icon(Icons.refresh, color: Color(0xFF3DDDB5), size: 20),
+                          tooltip: 'Scan Again',
+                          onPressed: _startAutoDiscovery,
+                        ),
+                    ],
+                  ),
+                ),
+                // Subtle, non-intrusive manual IP toggle
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: TextButton(
+                    style: TextButton.styleFrom(
+                      foregroundColor: const Color(0xFFA7B0B9),
+                      textStyle: const TextStyle(fontSize: 12),
+                    ),
+                    onPressed: () {
+                      setState(() => showManualIpInput = !showManualIpInput);
+                    },
+                    child: Text(showManualIpInput ? 'Hide Manual IP' : 'Enter IP manually'),
+                  ),
+                ),
+                if (showManualIpInput)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 12),
+                    child: TextField(
+                      controller: hubIpController,
+                      keyboardType: TextInputType.url,
+                      decoration: InputDecoration(
+                        labelText: 'Manual Hub IP',
+                        contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                        border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+                      ),
+                    ),
+                  ),
+              ],
+
+              // MAIN CARD: Setup & Controls
               Container(
                 padding: const EdgeInsets.all(20),
                 decoration: BoxDecoration(
                   color: const Color(0xFF1C252C),
                   borderRadius: BorderRadius.circular(20),
                   border: Border.all(
-                    color: isRunning ? const Color(0xFF22BFA2) : Colors.white12,
-                    width: 2,
+                    color: isRunning ? const Color(0xFF22BFA2) : Colors.white10,
                   ),
                 ),
                 child: Column(
                   children: [
-                    Icon(
-                      isHostMode ? Icons.hub : Icons.sensors,
-                      size: 44,
-                      color: isRunning ? const Color(0xFF22BFA2) : Colors.grey,
-                    ),
-                    const SizedBox(height: 10),
-                    Text(
-                      isHostMode ? 'Central Dashboard Hub' : 'Remote Probe Streamer',
-                      style: const TextStyle(fontSize: 19, fontWeight: FontWeight.bold),
-                    ),
-                    const SizedBox(height: 6),
-                    Text(
-                      isHostMode
-                          ? 'Hosts the single dashboard webpage. Connect up to 10 phones to this single URL!'
-                          : 'Sends this phone\'s live power data to the Hub Phone over Wi-Fi.',
-                      textAlign: TextAlign.center,
-                      style: const TextStyle(color: Color(0xFFA7B0B9), fontSize: 13),
-                    ),
-                    const SizedBox(height: 16),
-
-                    // Custom Nickname input
                     if (!isRunning) ...[
                       TextField(
                         controller: nicknameController,
                         decoration: InputDecoration(
-                          labelText: 'Device Nickname (Optional)',
-                          hintText: 'e.g. My iQOO Z6 or Mom\'s Phone',
-                          contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                          border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
+                          labelText: 'Device Nickname',
+                          hintText: deviceName,
+                          prefixIcon: const Icon(Icons.phone_android, size: 20),
+                          contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                          border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
                         ),
                       ),
                       const SizedBox(height: 12),
-                    ],
-
-                    // In Probe mode: Target Hub IP input
-                    if (!isHostMode && !isRunning) ...[
-                      TextField(
-                        controller: hubIpController,
-                        keyboardType: TextInputType.url,
-                        decoration: InputDecoration(
-                          labelText: 'Hub Phone IP Address',
-                          hintText: 'e.g. $cachedLocalIp',
-                          prefixIcon: const Icon(Icons.wifi, size: 20),
-                          contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                          border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
+                      SwitchListTile(
+                        contentPadding: EdgeInsets.zero,
+                        title: const Text(
+                          '80% Chime Alert',
+                          style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold),
                         ),
+                        subtitle: const Text(
+                          'Chimes in browser every 10s at 80%+',
+                          style: TextStyle(fontSize: 12, color: Color(0xFFA7B0B9)),
+                        ),
+                        value: enable80AlertSound,
+                        activeColor: const Color(0xFF22BFA2),
+                        onChanged: (val) {
+                          setState(() => enable80AlertSound = val);
+                        },
                       ),
-                      const SizedBox(height: 12),
-                    ],
-
-                    // 80% Sound Alert Toggle Switch (Two-Way Synced)
-                    SwitchListTile(
-                      contentPadding: EdgeInsets.zero,
-                      title: const Text(
-                        '80% Charge Sound Alert',
-                        style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold),
+                    ] else ...[
+                      // Active Session Status
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Container(
+                            width: 8,
+                            height: 8,
+                            decoration: const BoxDecoration(
+                              color: Color(0xFF2ECC91),
+                              shape: BoxShape.circle,
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Text(
+                            isHostMode ? 'Hub Online' : 'Streaming Active',
+                            style: const TextStyle(
+                              fontWeight: FontWeight.bold,
+                              fontSize: 15,
+                              color: Color(0xFF2ECC91),
+                            ),
+                          ),
+                        ],
                       ),
-                      subtitle: const Text(
-                        'Chimes in browser every 10s when battery reaches 80%+',
-                        style: TextStyle(fontSize: 12, color: Color(0xFFA7B0B9)),
-                      ),
-                      value: enable80AlertSound,
-                      activeColor: const Color(0xFF22BFA2),
-                      onChanged: (val) {
-                        setState(() => enable80AlertSound = val);
-                      },
-                    ),
-
-                    // Running Link Box
-                    if (isRunning) ...[
-                      const SizedBox(height: 10),
+                      const SizedBox(height: 14),
                       Container(
                         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
                         decoration: BoxDecoration(
                           color: const Color(0xFF101419),
-                          borderRadius: BorderRadius.circular(10),
-                          border: Border.all(color: const Color(0xFF22BFA2)),
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(color: const Color(0xFF22BFA2).withOpacity(0.5)),
                         ),
                         child: SelectableText(
                           broadcastUrl,
@@ -815,16 +1058,15 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
                         ),
                       ),
                       if (isHostMode) ...[
-                        const SizedBox(height: 10),
-                        ElevatedButton.icon(
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: const Color(0xFF22BFA2).withOpacity(0.15),
+                        const SizedBox(height: 12),
+                        OutlinedButton.icon(
+                          style: OutlinedButton.styleFrom(
                             foregroundColor: const Color(0xFF22BFA2),
                             side: const BorderSide(color: Color(0xFF22BFA2)),
                             shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
                           ),
                           icon: const Icon(Icons.copy, size: 16),
-                          label: const Text('Copy Single Hub URL'),
+                          label: const Text('Copy Dashboard URL'),
                           onPressed: _copyLink,
                         ),
                       ],
@@ -842,11 +1084,13 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
                     backgroundColor: const Color(0xFF22BFA2),
                     foregroundColor: Colors.black,
                     minimumSize: const Size.fromHeight(50),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
                   ),
-                  icon: const Icon(Icons.play_arrow),
+                  icon: Icon(isHostMode ? Icons.play_arrow : Icons.link),
                   label: Text(
-                    isHostMode ? 'Start Single-IP Central Hub' : 'Connect to Central Hub',
+                    isHostMode
+                        ? 'Start Central Hub'
+                        : (discoveredHubIp != null ? 'Auto-Connect' : 'Connect to Hub'),
                     style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
                   ),
                   onPressed: isHostMode ? _startHost : _startProbe,
@@ -857,42 +1101,24 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
                     backgroundColor: const Color(0xFFEF6464),
                     foregroundColor: Colors.white,
                     minimumSize: const Size.fromHeight(50),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
                   ),
                   icon: const Icon(Icons.stop),
-                  label: const Text('Stop Session', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
+                  label: const Text(
+                    'Stop Session',
+                    style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
+                  ),
                   onPressed: _stopSession,
                 ),
 
               const SizedBox(height: 24),
 
-              // MULTI-DEVICE INSTRUCTIONS CARD
-              Container(
-                padding: const EdgeInsets.all(18),
-                decoration: BoxDecoration(
-                  color: const Color(0xFF161D23),
-                  borderRadius: BorderRadius.circular(16),
-                  border: Border.all(color: Colors.white10),
-                ),
-                child: const Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      children: [
-                        Icon(Icons.devices, color: Color(0xFF3DDDB5), size: 20),
-                        SizedBox(width: 8),
-                        Text('How to view all phones on 1 IP:', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
-                      ],
-                    ),
-                    SizedBox(height: 10),
-                    Text('1. On Phone 1: Select "Central Hub", tap Start. Copy the URL.', style: TextStyle(color: Color(0xFFA7B0B9), fontSize: 12.5, height: 1.4)),
-                    SizedBox(height: 6),
-                    Text('2. On Phone 2..10: Select "Join as Probe", enter Phone 1\'s IP, tap Connect.', style: TextStyle(color: Color(0xFFA7B0B9), fontSize: 12.5, height: 1.4)),
-                    SizedBox(height: 6),
-                    Text('3. Open the single URL in Chrome: All phones appear together in a dynamic auto-resizing grid!', style: TextStyle(color: Color(0xFF3DDDB5), fontSize: 12.5, height: 1.4, fontWeight: FontWeight.bold)),
-                    SizedBox(height: 6),
-                    Text('4. Sound is heard through the browser only. Toggling the sound switch in the app OR on the webpage keeps both 100% in sync!', style: TextStyle(color: Color(0xFFA7B0B9), fontSize: 12.5, height: 1.4)),
-                  ],
+              // SUBTLE MINIMAL FOOTER NOTE
+              const Center(
+                child: Text(
+                  '💡 Pro-Tip: Lock your screen after connecting to unlock orginal charging speed.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(fontSize: 12, color: Color(0xFFA7B0B9)),
                 ),
               ),
             ],

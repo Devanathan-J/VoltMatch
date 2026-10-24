@@ -252,7 +252,7 @@ class HomeScreen extends StatelessWidget {
                             ),
                             SizedBox(height: 4),
                             Text(
-                              'Test full 44W speed with screen completely black',
+                              'Test with screen completely Off',
                               style: TextStyle(
                                 color: Color(0xFFA7B0B9),
                                 fontSize: 13,
