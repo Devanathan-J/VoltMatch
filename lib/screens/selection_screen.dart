@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import '../models/power_models.dart';
 import '../services/catalog_service.dart';
 import '../services/compatibility_engine.dart';
@@ -58,6 +59,90 @@ class _SelectionScreenState extends State<SelectionScreen> {
       final matchesSearch = c.name.toLowerCase().contains(chargerSearchQuery.toLowerCase());
       return matchesBrand && matchesSearch;
     }).toList();
+  }
+
+  // 1-TAP HARDWARE AUTO-DETECTION ENGINE
+  Future<void> _autoDetectDevice() async {
+    try {
+      const platform = MethodChannel('com.voltmatch/hardware');
+      final Map<dynamic, dynamic>? info = await platform.invokeMethod('getDeviceInfo');
+      if (info == null || !mounted) return;
+
+      final model = (info['model'] ?? '').toString().toLowerCase();
+      final manufacturer = (info['manufacturer'] ?? '').toString().toLowerCase();
+      final device = (info['device'] ?? '').toString().toLowerCase();
+
+      DeviceModel? matched;
+
+      // 1. Search through the MobileModels modelCodes mapping
+      for (var d in CatalogService.devices) {
+        if (d.modelCodes.any((code) => model.contains(code.toLowerCase()) || device.contains(code.toLowerCase()))) {
+          matched = d;
+          break;
+        }
+      }
+
+      // 2. Fallback check by name or manufacturer
+      if (matched == null) {
+        for (var d in CatalogService.devices) {
+          final dName = d.name.toLowerCase();
+          final dMfg = d.manufacturer.toLowerCase();
+          if (dName.contains(model) || (dMfg.contains(manufacturer) && dName.contains(model))) {
+            matched = d;
+            break;
+          }
+        }
+      }
+
+      if (matched != null) {
+        setState(() {
+          selectedDeviceBrand = matched!.manufacturer;
+          deviceSearchQuery = '';
+          selectedDevice = matched;
+        });
+
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('✨ Auto-Detected: ${matched.name} (${info['model']})'),
+            backgroundColor: const Color(0xFF22BFA2),
+          ),
+        );
+      } else {
+        // Device not yet in catalog: auto pre-fill custom device
+        final fullName = info['fullName'] ?? 'My Device';
+        final autoDevice = DeviceModel(
+          id: 'autodetect_${DateTime.now().millisecondsSinceEpoch}',
+          name: '$fullName (Detected)',
+          manufacturer: info['manufacturer'] ?? 'Other',
+          category: 'phone',
+          connector: 'USB-C',
+          isVerified: false,
+          recommendedPower: 25.0,
+          minPower: 10.0,
+          acceptedProfiles: [
+            PowerProfile(voltage: 5.0, maxCurrent: 3.0),
+            PowerProfile(voltage: 9.0, maxCurrent: 2.77),
+          ],
+        );
+
+        setState(() {
+          CatalogService.devices.insert(0, autoDevice);
+          selectedDeviceBrand = 'All Brands';
+          selectedDevice = autoDevice;
+        });
+
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Detected: $fullName (Added to list)'),
+            backgroundColor: const Color(0xFF22BFA2),
+          ),
+        );
+      }
+    } catch (_) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Auto-detect works on Android devices')),
+      );
+    }
   }
 
   void _addCustomDevice() {
@@ -230,7 +315,37 @@ class _SelectionScreenState extends State<SelectionScreen> {
                 ),
                 child: Column(
                   children: [
-                    // Brand Filter (Full Width)
+                    // PROMINENT 1-TAP AUTO-DETECT BUTTON (Zero Overflow)
+                    InkWell(
+                      onTap: _autoDetectDevice,
+                      borderRadius: BorderRadius.circular(10),
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 12),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF2ECC91).withOpacity(0.12),
+                          borderRadius: BorderRadius.circular(10),
+                          border: Border.all(color: const Color(0xFF2ECC91).withOpacity(0.35)),
+                        ),
+                        child: const Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Icon(Icons.auto_awesome, size: 16, color: Color(0xFF2ECC91)),
+                            SizedBox(width: 8),
+                            Text(
+                              'Auto-Detect Current Phone',
+                              style: TextStyle(
+                                color: Color(0xFF2ECC91),
+                                fontWeight: FontWeight.bold,
+                                fontSize: 13,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 14),
+
+                    // Brand Filter
                     DropdownButtonFormField<String>(
                       isExpanded: true,
                       value: selectedDeviceBrand,
@@ -256,7 +371,7 @@ class _SelectionScreenState extends State<SelectionScreen> {
                       },
                     ),
                     const SizedBox(height: 12),
-                    // Search Filter (Full Width)
+                    // Search Filter
                     TextField(
                       decoration: const InputDecoration(
                         hintText: 'Search model (e.g. S24, 15 Pro, Z6)...',
@@ -267,7 +382,7 @@ class _SelectionScreenState extends State<SelectionScreen> {
                       onChanged: (text) => setState(() => deviceSearchQuery = text),
                     ),
                     const SizedBox(height: 12),
-                    // Model Dropdown (Full Width)
+                    // Model Dropdown
                     DropdownButtonFormField<DeviceModel>(
                       isExpanded: true,
                       value: filteredDevices.contains(selectedDevice)
@@ -315,7 +430,6 @@ class _SelectionScreenState extends State<SelectionScreen> {
                 ),
                 child: Column(
                   children: [
-                    // Brand Filter (Full Width)
                     DropdownButtonFormField<String>(
                       isExpanded: true,
                       value: selectedChargerBrand,
@@ -341,7 +455,6 @@ class _SelectionScreenState extends State<SelectionScreen> {
                       },
                     ),
                     const SizedBox(height: 12),
-                    // Search Filter (Full Width)
                     TextField(
                       decoration: const InputDecoration(
                         hintText: 'Search charger (e.g. 65W, Anker, FlashCharge)...',
@@ -352,7 +465,6 @@ class _SelectionScreenState extends State<SelectionScreen> {
                       onChanged: (text) => setState(() => chargerSearchQuery = text),
                     ),
                     const SizedBox(height: 12),
-                    // Model Dropdown (Full Width)
                     DropdownButtonFormField<ChargerModel>(
                       isExpanded: true,
                       value: filteredChargers.contains(selectedCharger)
@@ -429,15 +541,12 @@ class _SelectionScreenState extends State<SelectionScreen> {
   }
 
   Widget _buildSectionTitle(String title, IconData icon) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 10),
-      child: Row(
-        children: [
-          Icon(icon, size: 18, color: const Color(0xFF3DDDB5)),
-          const SizedBox(width: 8),
-          Text(title, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-        ],
-      ),
+    return Row(
+      children: [
+        Icon(icon, size: 18, color: const Color(0xFF3DDDB5)),
+        const SizedBox(width: 8),
+        Text(title, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+      ],
     );
   }
 }

@@ -29,6 +29,7 @@ class DeviceModel {
   final double recommendedPower;
   final double minPower;
   final List<PowerProfile> acceptedProfiles;
+  final List<String> modelCodes; // <-- Added from MobileModels database!
 
   DeviceModel({
     required this.id,
@@ -40,6 +41,7 @@ class DeviceModel {
     required this.recommendedPower,
     required this.minPower,
     required this.acceptedProfiles,
+    this.modelCodes = const [],
   });
 
   factory DeviceModel.fromJson(Map<String, dynamic> json) {
@@ -55,6 +57,9 @@ class DeviceModel {
       acceptedProfiles: (json['acceptedProfiles'] as List)
           .map((p) => PowerProfile.fromJson(p))
           .toList(),
+      modelCodes: json['modelCodes'] != null
+          ? List<String>.from(json['modelCodes'])
+          : [],
     );
   }
 
@@ -68,6 +73,7 @@ class DeviceModel {
     'recommendedPower': recommendedPower,
     'minPower': minPower,
     'acceptedProfiles': acceptedProfiles.map((p) => p.toJson()).toList(),
+    'modelCodes': modelCodes,
   };
 }
 
@@ -118,7 +124,7 @@ class ChargerModel {
 class CableModel {
   final String id;
   final String name;
-  final double currentRating; // 3.0, 5.0, or 0.0 for unknown
+  final double currentRating;
   final bool isVerified;
 
   CableModel({

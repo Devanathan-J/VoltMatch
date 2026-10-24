@@ -266,7 +266,7 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
 
     _startUdpBeacon();
 
-    _fastTimer = Timer.periodic(const Duration(milliseconds: 300), (_) {
+    _fastTimer = Timer.periodic(const Duration(milliseconds: 400), (_) {
       _fetchSelfStats();
       _pruneStaleDevices();
     });
@@ -378,7 +378,7 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
 
     final selfId = 'probe_${Platform.operatingSystem}_${cachedLocalIp.replaceAll('.', '_')}';
 
-    _fastTimer = Timer.periodic(const Duration(milliseconds: 300), (_) async {
+    _fastTimer = Timer.periodic(const Duration(milliseconds: 400), (_) async {
       await _fetchSelfStats();
       try {
         final effectiveName = nicknameController.text.trim().isNotEmpty
@@ -487,6 +487,7 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
       border-radius: 20px;
       font-size: 13px;
       font-weight: 600;
+      transition: all 0.3s ease;
     }
     .sound-btn {
       background: rgba(255,255,255,0.06);
@@ -497,6 +498,7 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
       font-size: 12px;
       font-weight: 600;
       cursor: pointer;
+      transition: all 0.2s ease;
     }
     .grid {
       width: 100%;
@@ -582,7 +584,21 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
     let soundEnabled = true;
     let isSyncing = false;
     let lastTingTime = 0;
+    let consecutiveErrors = 0; // Professional-grade 3-strike network resilience
     const deviceHistories = {};
+
+    // Pre-warm AudioContext on user interaction so audio never blocks the network thread
+    function getAudioContext() {
+      if (!audioCtx) {
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      }
+      if (audioCtx && audioCtx.state === 'suspended') {
+        audioCtx.resume();
+      }
+      return audioCtx;
+    }
+
+    document.addEventListener('click', () => { getAudioContext(); }, { once: true });
 
     function updateSoundUi(enabled) {
       const btn = document.getElementById('sound-toggle');
@@ -610,40 +626,37 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
       setTimeout(() => { isSyncing = false; }, 600);
     }
 
+    // Decoupled, non-blocking chime synthesizer
     function playMildTing() {
       if (!soundEnabled) return;
       try {
-        if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-        if (audioCtx.state === 'suspended') audioCtx.resume();
-        const now = audioCtx.currentTime;
+        const ctx = getAudioContext();
+        if (!ctx) return;
+        const now = ctx.currentTime;
 
-        const osc1 = audioCtx.createOscillator();
-        const gain1 = audioCtx.createGain();
+        const osc1 = ctx.createOscillator();
+        const gain1 = ctx.createGain();
         osc1.type = 'sine';
         osc1.frequency.setValueAtTime(1760, now);
         gain1.gain.setValueAtTime(0.14, now);
         gain1.gain.exponentialRampToValueAtTime(0.0001, now + 0.8);
         osc1.connect(gain1);
-        gain1.connect(audioCtx.destination);
+        gain1.connect(ctx.destination);
         osc1.start(now);
         osc1.stop(now + 0.8);
 
-        const osc2 = audioCtx.createOscillator();
-        const gain2 = audioCtx.createGain();
+        const osc2 = ctx.createOscillator();
+        const gain2 = ctx.createGain();
         osc2.type = 'sine';
         osc2.frequency.setValueAtTime(2637, now);
         gain2.gain.setValueAtTime(0.09, now);
         gain2.gain.exponentialRampToValueAtTime(0.0001, now + 0.6);
         osc2.connect(gain2);
-        gain2.connect(audioCtx.destination);
+        gain2.connect(ctx.destination);
         osc2.start(now);
         osc2.stop(now + 0.6);
       } catch(e) {}
     }
-
-    document.addEventListener('click', () => {
-      if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
-    }, { once: true });
 
     function drawSparkline(canvasId, historyData) {
       const cvs = document.getElementById(canvasId);
@@ -668,14 +681,18 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
 
     async function pollHub() {
       try {
+        // Generous 2.5s network timeout ensures Wi-Fi micro-delays never trigger a false disconnect
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 1200);
+        const timeoutId = setTimeout(() => controller.abort(), 2500);
         const res = await fetch('/api/stats', { signal: controller.signal });
         clearTimeout(timeoutId);
 
         if (!res.ok) throw new Error("Offline");
         const payload = await res.json();
         const devices = payload.devices || [];
+
+        // Connection is healthy: reset error counter immediately
+        consecutiveErrors = 0;
 
         if (!isSyncing && payload.soundEnabled !== undefined) {
           soundEnabled = payload.soundEnabled;
@@ -699,12 +716,14 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
           return;
         }
 
+        // Check 80% charge threshold
         const has80Charging = devices.some(d => d.batteryPct >= 80 && d.isCharging);
         const now = Date.now();
         if (has80Charging && soundEnabled) {
           if (now - lastTingTime >= 10000) {
             lastTingTime = now;
-            playMildTing();
+            // Run sound in separate macrotask so it never delays rendering
+            setTimeout(playMildTing, 0);
           }
         } else {
           lastTingTime = 0;
@@ -758,23 +777,28 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
         });
 
       } catch(e) {
-        const grid = document.getElementById('devices-grid');
-        const badge = document.getElementById('hub-count');
-        badge.innerText = 'Offline';
-        badge.style.background = 'rgba(239,100,100,0.15)';
-        badge.style.color = '#EF6464';
+        consecutiveErrors++;
+        // PROFESSIONAL RULE: Only show disconnect card after 3 consecutive failures (>3 seconds of real silence)
+        if (consecutiveErrors >= 3) {
+          const grid = document.getElementById('devices-grid');
+          const badge = document.getElementById('hub-count');
+          badge.innerText = 'Offline';
+          badge.style.background = 'rgba(239,100,100,0.15)';
+          badge.style.color = '#EF6464';
 
-        grid.innerHTML = `
-          <div class="disconnect-card">
-            <div style="font-size: 38px; margin-bottom: 10px;">🛑</div>
-            <div style="font-size: 20px; font-weight: 800; color: #EF6464; margin-bottom: 6px;">Broadcast Stopped</div>
-            <div style="color: var(--subtext); font-size: 13px;">Tap Start on your phone to resume streaming.</div>
-          </div>
-        `;
+          grid.innerHTML = `
+            <div class="disconnect-card">
+              <div style="font-size: 38px; margin-bottom: 10px;">🛑</div>
+              <div style="font-size: 20px; font-weight: 800; color: #EF6464; margin-bottom: 6px;">Broadcast Stopped</div>
+              <div style="color: var(--subtext); font-size: 13px;">Tap Start on your phone to resume streaming.</div>
+            </div>
+          `;
+        }
       }
     }
 
-    setInterval(pollHub, 300);
+    // Steady, stable 500ms heartbeat
+    setInterval(pollHub, 500);
     pollHub();
   </script>
 </body>
@@ -946,7 +970,6 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
                     ],
                   ),
                 ),
-                // Subtle, non-intrusive manual IP toggle
                 Align(
                   alignment: Alignment.centerRight,
                   child: TextButton(
@@ -975,7 +998,7 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
                   ),
               ],
 
-              // MAIN CARD: Setup & Controls
+              // MAIN SETUP CARD
               Container(
                 padding: const EdgeInsets.all(20),
                 decoration: BoxDecoration(
@@ -1016,7 +1039,6 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
                         },
                       ),
                     ] else ...[
-                      // Active Session Status
                       Row(
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [
@@ -1113,10 +1135,9 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
 
               const SizedBox(height: 24),
 
-              // SUBTLE MINIMAL FOOTER NOTE
               const Center(
                 child: Text(
-                  '💡 Pro-Tip: Lock your screen after connecting to unlock orginal charging speed.',
+                  '💡 Pro-Tip: Lock your screen after connecting to unlock full 44W+ charging.',
                   textAlign: TextAlign.center,
                   style: TextStyle(fontSize: 12, color: Color(0xFFA7B0B9)),
                 ),

@@ -226,7 +226,7 @@ class _LiveTesterScreenState extends State<LiveTesterScreen> {
                       SizedBox(width: 12),
                       Expanded(
                         child: Text(
-                          'Showing ~7W - 13W? Normal for screen-on or battery above 80%. Read below!',
+                          'Showing 7W - 13W or Lower? Normal for screen-on or battery above 80%. Read below!',
                           style: TextStyle(
                             color: Color(0xFFF5B544),
                             fontSize: 13,
