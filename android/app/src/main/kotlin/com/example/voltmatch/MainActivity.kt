@@ -1,10 +1,11 @@
-package com.example.voltmatch // (Keep your package name if different)
+package com.example.voltmatch
 
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.hardware.usb.UsbManager
 import android.os.BatteryManager
+import android.os.Build
 import android.os.PowerManager
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -14,6 +15,7 @@ import kotlin.math.abs
 class MainActivity: FlutterActivity() {
     private val CHANNEL = "com.voltmatch/hardware"
     private var wakeLock: PowerManager.WakeLock? = null
+    private val deviceName = "${Build.MANUFACTURER.replaceFirstChar { it.uppercase() }} ${Build.MODEL}"
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -25,9 +27,15 @@ class MainActivity: FlutterActivity() {
                     val ifilter = IntentFilter(Intent.ACTION_BATTERY_CHANGED)
                     val batteryStatus = registerReceiver(null, ifilter)
 
-                    // 1. Current in mA
-                    val currentNow = batteryManager.getIntProperty(BatteryManager.BATTERY_PROPERTY_CURRENT_NOW)
-                    val currentInMA = abs(currentNow) / 1000.0
+                    // 1. SMART CURRENT AUTO-DETECT (Fixes Samsung vs iQOO/Pixel scale mismatch)
+                    val rawCurrent = abs(batteryManager.getIntProperty(BatteryManager.BATTERY_PROPERTY_CURRENT_NOW))
+                    val currentInMA = if (rawCurrent > 10000) {
+                        // Microamperes (iQOO, Pixel, Xiaomi): divide by 1000
+                        rawCurrent / 1000.0
+                    } else {
+                        // Milliamperes (Samsung Galaxy A-series quirk): already in mA!
+                        rawCurrent.toDouble()
+                    }
 
                     // 2. Voltage in Volts
                     val voltageMv = batteryStatus?.getIntExtra(BatteryManager.EXTRA_VOLTAGE, -1) ?: 0
@@ -43,11 +51,11 @@ class MainActivity: FlutterActivity() {
                     val scale = batteryStatus?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: -1
                     val batteryPct = if (level >= 0 && scale > 0) (level * 100 / scale) else 0
 
-                    // 5. Battery Temperature in °C (EXTRA_TEMPERATURE is in tenths of a °C)
+                    // 5. Battery Temp in °C
                     val rawTemp = batteryStatus?.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, 0) ?: 0
                     val tempC = rawTemp / 10.0
 
-                    // 6. Charger Negotiated Hardware Ceiling (Read via direct string keys)
+                    // 6. Hardware Ceiling
                     val maxCurrentUa = batteryStatus?.getIntExtra("max_charging_current", -1) ?: -1
                     val maxVoltageUv = batteryStatus?.getIntExtra("max_charging_voltage", -1) ?: -1
                     var maxWatts = 0.0
@@ -65,6 +73,7 @@ class MainActivity: FlutterActivity() {
                     val hasDataConnection = usbStatus?.extras?.getBoolean("connected") ?: false
 
                     val response = mapOf(
+                        "deviceName" to deviceName,
                         "currentMA" to currentInMA,
                         "voltageV" to voltageInV,
                         "isCharging" to isCharging,
@@ -80,7 +89,7 @@ class MainActivity: FlutterActivity() {
                 "acquireWakeLock" -> {
                     val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
                     wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "VoltMatch::MonitorWakelock")
-                    wakeLock?.acquire(30 * 60 * 1000L)
+                    wakeLock?.acquire(45 * 60 * 1000L)
                     result.success(true)
                 }
                 "releaseWakeLock" -> {
