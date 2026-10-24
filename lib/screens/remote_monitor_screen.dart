@@ -14,7 +14,9 @@ class RemoteMonitorScreen extends StatefulWidget {
 class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
   static const platform = MethodChannel('com.voltmatch/hardware');
 
-  bool isHostMode = true;
+  // SMART DEFAULTS: Windows defaults to Central Hub; Android defaults to Join as Probe!
+  late bool isHostMode;
+
   bool enable80AlertSound = true;
   bool isRunning = false;
   bool showManualIpInput = false;
@@ -34,12 +36,19 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
 
   HttpServer? _server;
   Timer? _fastTimer;
+  Timer? _alertWatchdogTimer;
   HttpClient? _probeClient;
 
   final Map<String, Map<String, dynamic>> _connectedDevices = {};
+  final Map<String, List<double>> _deviceHistories = {};
+
+  final Set<String> _notified80Devices = {};
+  DateTime _lastSoundTime = DateTime.fromMillisecondsSinceEpoch(0);
+
+  final List<String> _csvLog = ['Timestamp,Device,Watts,Current_mA,Voltage_V,Battery_Pct,Temp_C,Is_Charging'];
 
   // Self telemetry
-  String deviceName = 'Android Device';
+  String deviceName = Platform.isWindows ? 'Windows Desktop Host' : 'Android Device';
   double currentMA = 0.0;
   double voltageV = 0.0;
   double liveWatts = 0.0;
@@ -51,6 +60,9 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
   @override
   void initState() {
     super.initState();
+    // Windows = Central Hub by default; Android = Join as Probe by default!
+    isHostMode = Platform.isWindows;
+
     _resolveLocalIp().then((_) {
       if (!isHostMode) {
         _startAutoDiscovery();
@@ -80,6 +92,148 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
         }
       }
     } catch (_) {}
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // WINDOWS NATIVE SOUND & TOAST NOTIFICATION ENGINE
+  // ─────────────────────────────────────────────────────────────
+
+  void _playWindowsChime() {
+    if (Platform.isWindows) {
+      Process.run('powershell', [
+        '-NoProfile',
+        '-WindowStyle', 'Hidden',
+        '-Command',
+        r'''
+        $soundFiles = @(
+          'C:\Windows\Media\Windows Notify System Generic.wav',
+          'C:\Windows\Media\Windows Background.wav',
+          'C:\Windows\Media\notify.wav',
+          'C:\Windows\Media\chimes.wav'
+        )
+        $played = $false
+        foreach ($f in $soundFiles) {
+          if (Test-Path $f) {
+            try {
+              (New-Object Media.SoundPlayer $f).PlaySync()
+              $played = $true
+              break
+            } catch {}
+          }
+        }
+        if (-not $played) {
+          [Console]::Beep(1760, 200)
+          [Console]::Beep(2637, 250)
+        }
+        '''
+      ]);
+    } else {
+      SystemSound.play(SystemSoundType.alert);
+    }
+  }
+
+  void _showWindowsNotification(String deviceLabel, int pct) {
+    if (Platform.isWindows) {
+      final safeName = deviceLabel.replaceAll('"', '').replaceAll("'", '');
+      Process.run('powershell', [
+        '-NoProfile',
+        '-WindowStyle', 'Hidden',
+        '-Command',
+        '''
+        try {
+          [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
+          [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] | Out-Null
+          \$xml = @"
+<toast>
+  <visual>
+    <binding template="ToastGeneric">
+      <text>⚡ VoltMatch: 80% Reached!</text>
+      <text>$safeName is at $pct%. Unplug recommended.</text>
+    </binding>
+  </visual>
+</toast>
+"@
+          \$doc = New-Object Windows.Data.Xml.Dom.XmlDocument
+          \$doc.LoadXml(\$xml)
+          \$toast = [Windows.UI.Notifications.ToastNotification]::new(\$doc)
+          [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe").Show(\$toast)
+        } catch {}
+        '''
+      ]);
+    }
+  }
+
+  void _testAlertSound() {
+    _playWindowsChime();
+    _showWindowsNotification('Test Device', 80);
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('🔔 Testing Windows Chime & Notification...'),
+        backgroundColor: Color(0xFF22BFA2),
+        duration: Duration(seconds: 2),
+      ),
+    );
+  }
+
+  void _runAlertWatchdog() {
+    if (!enable80AlertSound) return;
+
+    bool anyDeviceNeedsSound = false;
+    final now = DateTime.now();
+
+    for (var d in _connectedDevices.values) {
+      final id = d['id']?.toString() ?? '';
+      final name = d['name']?.toString() ?? 'Device';
+      final bat = (d['batteryPct'] as num?)?.toInt() ?? 0;
+      final watts = (d['watts'] as num?)?.toDouble() ?? 0.0;
+      final rawChg = d['isCharging'];
+      final isPlugged = (rawChg == true || rawChg == 'true' || watts > 0.3);
+
+      if (bat >= 80 && isPlugged) {
+        anyDeviceNeedsSound = true;
+
+        if (!_notified80Devices.contains(id)) {
+          _notified80Devices.add(id);
+          _showWindowsNotification(name, bat);
+        }
+      } else if (!isPlugged) {
+        _notified80Devices.remove(id);
+      }
+    }
+
+    if (anyDeviceNeedsSound) {
+      if (now.difference(_lastSoundTime).inSeconds >= 10) {
+        _lastSoundTime = now;
+        _playWindowsChime();
+      }
+    } else {
+      _lastSoundTime = DateTime.fromMillisecondsSinceEpoch(0);
+    }
+  }
+
+  Future<void> _exportCsvLog() async {
+    try {
+      final userProfile = Platform.environment['USERPROFILE'] ?? '.';
+      final downloadsDir = Directory('$userProfile\\Downloads');
+      final file = File('${downloadsDir.path}\\voltmatch_session_${DateTime.now().millisecondsSinceEpoch}.csv');
+      await file.writeAsString(_csvLog.join('\n'));
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('📥 Exported log to: ${file.path}'),
+            backgroundColor: const Color(0xFF22BFA2),
+            duration: const Duration(seconds: 4),
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Could not export CSV')),
+        );
+      }
+    }
   }
 
   // ─────────────────────────────────────────────────────────────
@@ -206,57 +360,72 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
   // ─────────────────────────────────────────────────────────────
 
   Future<void> _fetchSelfStats() async {
-    try {
-      final Map<dynamic, dynamic> res = await platform.invokeMethod('getLivePowerStats');
-      if (mounted) {
-        final charging = res['isCharging'] as bool;
-        final cMA = (res['currentMA'] as num).toDouble();
-        final vV = (res['voltageV'] as num).toDouble();
+    if (Platform.isAndroid) {
+      try {
+        final Map<dynamic, dynamic> res = await platform.invokeMethod('getLivePowerStats');
+        if (mounted) {
+          final charging = res['isCharging'] as bool;
+          final cMA = (res['currentMA'] as num).toDouble();
+          final vV = (res['voltageV'] as num).toDouble();
 
-        setState(() {
-          deviceName = res['deviceName'] ?? 'Device';
-          isCharging = charging;
-          voltageV = vV;
-          batteryPct = res['batteryPct'] as int;
-          tempC = (res['tempC'] as num).toDouble();
-          maxWatts = (res['maxChargingWatts'] as num).toDouble();
-
-          if (!charging) {
-            currentMA = 0.0;
-            liveWatts = 0.0;
-          } else {
-            currentMA = cMA;
+          setState(() {
+            deviceName = res['deviceName'] ?? 'Device';
+            isCharging = charging;
+            voltageV = vV;
+            batteryPct = res['batteryPct'] as int;
+            tempC = (res['tempC'] as num).toDouble();
+            maxWatts = (res['maxChargingWatts'] as num).toDouble();
+            currentMA = charging ? cMA : 0.0;
             liveWatts = voltageV * (currentMA / 1000.0);
-          }
 
-          if (isHostMode) {
-            final effectiveName = nicknameController.text.trim().isNotEmpty
-                ? nicknameController.text.trim()
-                : deviceName;
+            if (isHostMode) {
+              final effectiveName = nicknameController.text.trim().isNotEmpty
+                  ? nicknameController.text.trim()
+                  : deviceName;
 
-            _connectedDevices['self'] = {
-              'id': 'self',
-              'name': effectiveName,
-              'watts': liveWatts,
-              'currentMA': currentMA,
-              'voltageV': voltageV,
-              'batteryPct': batteryPct,
-              'tempC': tempC,
-              'maxChargingWatts': maxWatts,
-              'isCharging': isCharging,
-              'lastSeen': DateTime.now().millisecondsSinceEpoch,
-            };
-          }
-        });
-      }
-    } catch (_) {}
+              _recordDeviceTelemetry('self', {
+                'id': 'self',
+                'name': effectiveName,
+                'watts': liveWatts,
+                'currentMA': currentMA,
+                'voltageV': voltageV,
+                'batteryPct': batteryPct,
+                'tempC': tempC,
+                'maxChargingWatts': maxWatts,
+                'isCharging': isCharging,
+                'lastSeen': DateTime.now().millisecondsSinceEpoch,
+              });
+            }
+          });
+        }
+      } catch (_) {}
+    }
+  }
+
+  void _recordDeviceTelemetry(String id, Map<String, dynamic> data) {
+    _connectedDevices[id] = data;
+
+    if (!_deviceHistories.containsKey(id)) {
+      _deviceHistories[id] = List.filled(25, 0.0);
+    }
+    final watts = (data['watts'] as num?)?.toDouble() ?? 0.0;
+    _deviceHistories[id]!.add(watts);
+    if (_deviceHistories[id]!.length > 25) {
+      _deviceHistories[id]!.removeAt(0);
+    }
+
+    final now = DateTime.now();
+    _csvLog.add('${now.toIso8601String()},${data["name"]},${data["watts"]},${data["currentMA"]},${data["voltageV"]},${data["batteryPct"]},${data["tempC"]},${data["isCharging"]}');
+    if (_csvLog.length > 5000) _csvLog.removeAt(1);
   }
 
   // START: Host
   Future<void> _startHost() async {
     _stopDiscovery();
     await _resolveLocalIp();
-    await platform.invokeMethod('acquireWakeLock');
+    if (Platform.isAndroid) {
+      await platform.invokeMethod('acquireWakeLock');
+    }
 
     _server = await HttpServer.bind(InternetAddress.anyIPv4, 8080);
     setState(() {
@@ -269,6 +438,11 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
     _fastTimer = Timer.periodic(const Duration(milliseconds: 400), (_) {
       _fetchSelfStats();
       _pruneStaleDevices();
+      if (mounted) setState(() {});
+    });
+
+    _alertWatchdogTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      _runAlertWatchdog();
     });
 
     _server!.listen((HttpRequest req) async {
@@ -329,7 +503,8 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
           final data = json.decode(body) as Map<String, dynamic>;
           final id = data['id'] ?? 'probe_${DateTime.now().millisecondsSinceEpoch}';
           data['lastSeen'] = DateTime.now().millisecondsSinceEpoch;
-          _connectedDevices[id] = data;
+          _recordDeviceTelemetry(id, data);
+
           req.response
             ..statusCode = HttpStatus.ok
             ..write(json.encode({'status': 'ok'}))
@@ -368,7 +543,9 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
       return;
     }
 
-    await platform.invokeMethod('acquireWakeLock');
+    if (Platform.isAndroid) {
+      await platform.invokeMethod('acquireWakeLock');
+    }
     _probeClient = HttpClient()..connectionTimeout = const Duration(seconds: 1);
 
     setState(() {
@@ -406,15 +583,21 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
 
   Future<void> _stopSession() async {
     _fastTimer?.cancel();
+    _alertWatchdogTimer?.cancel();
     _probeClient?.close(force: true);
     await _server?.close(force: true);
-    await platform.invokeMethod('releaseWakeLock');
+    if (Platform.isAndroid) {
+      await platform.invokeMethod('releaseWakeLock');
+    }
 
     if (mounted) {
       setState(() {
         isRunning = false;
         broadcastUrl = '';
         _connectedDevices.clear();
+        _deviceHistories.clear();
+        _notified80Devices.clear();
+        _lastSoundTime = DateTime.fromMillisecondsSinceEpoch(0);
         liveWatts = 0.0;
         currentMA = 0.0;
         isCharging = false;
@@ -436,6 +619,10 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
       ),
     );
   }
+
+  // ─────────────────────────────────────────────────────────────
+  // WEB DASHBOARD HTML
+  // ─────────────────────────────────────────────────────────────
 
   String _generateMultiDeviceHtmlDashboard() {
     return '''
@@ -584,17 +771,12 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
     let soundEnabled = true;
     let isSyncing = false;
     let lastTingTime = 0;
-    let consecutiveErrors = 0; // Professional-grade 3-strike network resilience
+    let consecutiveErrors = 0;
     const deviceHistories = {};
 
-    // Pre-warm AudioContext on user interaction so audio never blocks the network thread
     function getAudioContext() {
-      if (!audioCtx) {
-        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-      }
-      if (audioCtx && audioCtx.state === 'suspended') {
-        audioCtx.resume();
-      }
+      if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
       return audioCtx;
     }
 
@@ -626,7 +808,6 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
       setTimeout(() => { isSyncing = false; }, 600);
     }
 
-    // Decoupled, non-blocking chime synthesizer
     function playMildTing() {
       if (!soundEnabled) return;
       try {
@@ -639,7 +820,7 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
         osc1.type = 'sine';
         osc1.frequency.setValueAtTime(1760, now);
         gain1.gain.setValueAtTime(0.14, now);
-        gain1.gain.exponentialRampToValueAtTime(0.0001, now + 0.8);
+        gain1.exponentialRampToValueAtTime(0.0001, now + 0.8);
         osc1.connect(gain1);
         gain1.connect(ctx.destination);
         osc1.start(now);
@@ -650,7 +831,7 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
         osc2.type = 'sine';
         osc2.frequency.setValueAtTime(2637, now);
         gain2.gain.setValueAtTime(0.09, now);
-        gain2.gain.exponentialRampToValueAtTime(0.0001, now + 0.6);
+        gain2.exponentialRampToValueAtTime(0.0001, now + 0.6);
         osc2.connect(gain2);
         gain2.connect(ctx.destination);
         osc2.start(now);
@@ -681,7 +862,6 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
 
     async function pollHub() {
       try {
-        // Generous 2.5s network timeout ensures Wi-Fi micro-delays never trigger a false disconnect
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 2500);
         const res = await fetch('/api/stats', { signal: controller.signal });
@@ -691,7 +871,6 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
         const payload = await res.json();
         const devices = payload.devices || [];
 
-        // Connection is healthy: reset error counter immediately
         consecutiveErrors = 0;
 
         if (!isSyncing && payload.soundEnabled !== undefined) {
@@ -716,13 +895,15 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
           return;
         }
 
-        // Check 80% charge threshold
-        const has80Charging = devices.some(d => d.batteryPct >= 80 && d.isCharging);
+        const has80Charging = devices.some(d => {
+          const w = d.watts || 0;
+          return d.batteryPct >= 80 && (d.isCharging === true || w > 0.3);
+        });
+
         const now = Date.now();
         if (has80Charging && soundEnabled) {
           if (now - lastTingTime >= 10000) {
             lastTingTime = now;
-            // Run sound in separate macrotask so it never delays rendering
             setTimeout(playMildTing, 0);
           }
         } else {
@@ -731,7 +912,8 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
 
         let html = '';
         devices.forEach((d) => {
-          const isChg = d.isCharging;
+          const w = d.watts || 0;
+          const isChg = (d.isCharging === true || w > 0.3);
           const wText = isChg ? d.watts.toFixed(1) + ' W' : '0.0 W';
           const statusCls = isChg ? 'status-charging' : 'status-idle';
           const statusText = isChg ? '⚡ Charging' : 'Unplugged';
@@ -778,7 +960,6 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
 
       } catch(e) {
         consecutiveErrors++;
-        // PROFESSIONAL RULE: Only show disconnect card after 3 consecutive failures (>3 seconds of real silence)
         if (consecutiveErrors >= 3) {
           const grid = document.getElementById('devices-grid');
           const badge = document.getElementById('hub-count');
@@ -797,7 +978,6 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
       }
     }
 
-    // Steady, stable 500ms heartbeat
     setInterval(pollHub, 500);
     pollHub();
   </script>
@@ -806,8 +986,17 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
 ''';
   }
 
+  // ─────────────────────────────────────────────────────────────
+  // FLUTTER UI: MOBILE & DESKTOP SWITCHER
+  // ─────────────────────────────────────────────────────────────
+
   @override
   Widget build(BuildContext context) {
+    // ONLY show the widescreen Mission Control dashboard on Windows Desktop!
+    if (isRunning && isHostMode && Platform.isWindows) {
+      return _buildInAppDashboard();
+    }
+
     return Scaffold(
       appBar: AppBar(
         title: const Text('Remote Monitor', style: TextStyle(fontWeight: FontWeight.bold)),
@@ -818,73 +1007,72 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
           child: ListView(
             padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
             children: [
-              // Segmented Mode Switcher
-              if (!isRunning)
-                Container(
-                  margin: const EdgeInsets.only(bottom: 20),
-                  padding: const EdgeInsets.all(4),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF161D23),
-                    borderRadius: BorderRadius.circular(14),
-                    border: Border.all(color: Colors.white10),
-                  ),
-                  child: Row(
-                    children: [
-                      Expanded(
-                        child: GestureDetector(
-                          onTap: () {
-                            setState(() => isHostMode = true);
-                            _stopDiscovery();
-                          },
-                          child: Container(
-                            padding: const EdgeInsets.symmetric(vertical: 10),
-                            decoration: BoxDecoration(
-                              color: isHostMode ? const Color(0xFF22BFA2) : Colors.transparent,
-                              borderRadius: BorderRadius.circular(10),
-                            ),
-                            child: Center(
-                              child: Text(
-                                'Central Hub',
-                                style: TextStyle(
-                                  color: isHostMode ? Colors.black : Colors.white70,
-                                  fontWeight: FontWeight.bold,
-                                  fontSize: 14,
-                                ),
-                              ),
-                            ),
-                          ),
-                        ),
-                      ),
-                      Expanded(
-                        child: GestureDetector(
-                          onTap: () {
-                            setState(() => isHostMode = false);
-                            _startAutoDiscovery();
-                          },
-                          child: Container(
-                            padding: const EdgeInsets.symmetric(vertical: 10),
-                            decoration: BoxDecoration(
-                              color: !isHostMode ? const Color(0xFF22BFA2) : Colors.transparent,
-                              borderRadius: BorderRadius.circular(10),
-                            ),
-                            child: Center(
-                              child: Text(
-                                'Join as Probe',
-                                style: TextStyle(
-                                  color: !isHostMode ? Colors.black : Colors.white70,
-                                  fontWeight: FontWeight.bold,
-                                  fontSize: 14,
-                                ),
-                              ),
-                            ),
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
+              // Segmented Mode Switcher (Allows switching on both platforms)
+              Container(
+                margin: const EdgeInsets.only(bottom: 20),
+                padding: const EdgeInsets.all(4),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF161D23),
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(color: Colors.white10),
                 ),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: GestureDetector(
+                        onTap: () {
+                          setState(() => isHostMode = true);
+                          _stopDiscovery();
+                        },
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(vertical: 10),
+                          decoration: BoxDecoration(
+                            color: isHostMode ? const Color(0xFF22BFA2) : Colors.transparent,
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                          child: Center(
+                            child: Text(
+                              'Central Hub',
+                              style: TextStyle(
+                                color: isHostMode ? Colors.black : Colors.white70,
+                                fontWeight: FontWeight.bold,
+                                fontSize: 14,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                    Expanded(
+                      child: GestureDetector(
+                        onTap: () {
+                          setState(() => isHostMode = false);
+                          _startAutoDiscovery();
+                        },
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(vertical: 10),
+                          decoration: BoxDecoration(
+                            color: !isHostMode ? const Color(0xFF22BFA2) : Colors.transparent,
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                          child: Center(
+                            child: Text(
+                              'Join as Probe',
+                              style: TextStyle(
+                                color: !isHostMode ? Colors.black : Colors.white70,
+                                fontWeight: FontWeight.bold,
+                                fontSize: 14,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
 
-              // PROBE MODE: Clean Auto-Discovery Radar Card
+              // PROBE MODE: Radar Card
               if (!isHostMode && !isRunning) ...[
                 Container(
                   padding: const EdgeInsets.all(18),
@@ -952,7 +1140,7 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
                             Text(
                               discoveredHubIp != null
                                   ? '$discoveredHubName ($discoveredHubIp)'
-                                  : 'Start Central Hub on Phone 1 first.',
+                                  : 'Start Central Hub on PC or Phone 1 first.',
                               style: const TextStyle(
                                 fontSize: 12,
                                 color: Color(0xFFA7B0B9),
@@ -1014,9 +1202,9 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
                       TextField(
                         controller: nicknameController,
                         decoration: InputDecoration(
-                          labelText: 'Device Nickname',
+                          labelText: 'Device / Host Nickname',
                           hintText: deviceName,
-                          prefixIcon: const Icon(Icons.phone_android, size: 20),
+                          prefixIcon: Icon(Platform.isWindows ? Icons.desktop_windows : Icons.devices, size: 20),
                           contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
                           border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
                         ),
@@ -1025,11 +1213,11 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
                       SwitchListTile(
                         contentPadding: EdgeInsets.zero,
                         title: const Text(
-                          '80% Chime Alert',
+                          '80% Chime & Notification Alert',
                           style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold),
                         ),
                         subtitle: const Text(
-                          'Chimes in browser every 10s at 80%+',
+                          'Notifies once and chimes every 10s at 80%+',
                           style: TextStyle(fontSize: 12, color: Color(0xFFA7B0B9)),
                         ),
                         value: enable80AlertSound,
@@ -1039,6 +1227,7 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
                         },
                       ),
                     ] else ...[
+                      // Mobile Running View (Clean & Spacious - No Overflows!)
                       Row(
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [
@@ -1052,7 +1241,7 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
                           ),
                           const SizedBox(width: 8),
                           Text(
-                            isHostMode ? 'Hub Online' : 'Streaming Active',
+                            isHostMode ? 'Central Hub Live' : 'Streaming Active',
                             style: const TextStyle(
                               fontWeight: FontWeight.bold,
                               fontSize: 15,
@@ -1063,7 +1252,7 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
                       ),
                       const SizedBox(height: 14),
                       Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
                         decoration: BoxDecoration(
                           color: const Color(0xFF101419),
                           borderRadius: BorderRadius.circular(12),
@@ -1073,7 +1262,7 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
                           broadcastUrl,
                           textAlign: TextAlign.center,
                           style: const TextStyle(
-                            fontSize: 16,
+                            fontSize: 15,
                             fontWeight: FontWeight.bold,
                             color: Color(0xFF3DDDB5),
                           ),
@@ -1088,7 +1277,7 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
                             shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
                           ),
                           icon: const Icon(Icons.copy, size: 16),
-                          label: const Text('Copy Dashboard URL'),
+                          label: const Text('Copy Hub Link'),
                           onPressed: _copyLink,
                         ),
                       ],
@@ -1108,10 +1297,10 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
                     minimumSize: const Size.fromHeight(50),
                     shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
                   ),
-                  icon: Icon(isHostMode ? Icons.play_arrow : Icons.link),
+                  icon: Icon(isHostMode ? (Platform.isWindows ? Icons.dashboard : Icons.play_arrow) : Icons.link),
                   label: Text(
                     isHostMode
-                        ? 'Start Central Hub'
+                        ? (Platform.isWindows ? 'Open In-App Mission Control' : 'Start Central Hub')
                         : (discoveredHubIp != null ? 'Auto-Connect' : 'Connect to Hub'),
                     style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
                   ),
@@ -1133,19 +1322,352 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
                   onPressed: _stopSession,
                 ),
 
-              const SizedBox(height: 24),
-
-              const Center(
-                child: Text(
-                  '💡 Pro-Tip: Lock your screen after connecting to unlock full 44W+ charging.',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(fontSize: 12, color: Color(0xFFA7B0B9)),
+              if (!Platform.isWindows) ...[
+                const SizedBox(height: 24),
+                const Center(
+                  child: Text(
+                    '💡 Pro-Tip: Lock your screen after connecting to unlock full 44W+ charging.',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(fontSize: 12, color: Color(0xFFA7B0B9)),
+                  ),
                 ),
-              ),
+              ],
             ],
           ),
         ),
       ),
     );
   }
+
+  // ─────────────────────────────────────────────────────────────
+  // WINDOWS DESKTOP NATIVE WIDESCREEN DASHBOARD VIEW
+  // ─────────────────────────────────────────────────────────────
+
+  Widget _buildInAppDashboard() {
+    final devices = _connectedDevices.values.toList();
+
+    return Scaffold(
+      appBar: AppBar(
+        title: Row(
+          children: [
+            const Icon(Icons.bolt, color: Color(0xFF22BFA2)),
+            const SizedBox(width: 8),
+            const Text(
+              'VoltMatch Desktop Mission Control',
+              style: TextStyle(fontWeight: FontWeight.bold, fontSize: 17),
+            ),
+          ],
+        ),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.volume_up, color: Color(0xFF3DDDB5)),
+            tooltip: 'Test Sound & Windows Notification',
+            onPressed: _testAlertSound,
+          ),
+          IconButton(
+            icon: const Icon(Icons.file_download, color: Color(0xFF3DDDB5)),
+            tooltip: 'Export CSV Log to Downloads',
+            onPressed: _exportCsvLog,
+          ),
+          IconButton(
+            icon: Icon(
+              enable80AlertSound ? Icons.notifications_active : Icons.notifications_off,
+              color: enable80AlertSound ? const Color(0xFF3DDDB5) : Colors.grey,
+            ),
+            tooltip: '80% Sound & Notification Alert',
+            onPressed: () {
+              setState(() => enable80AlertSound = !enable80AlertSound);
+            },
+          ),
+          IconButton(
+            icon: const Icon(Icons.link, color: Color(0xFF22BFA2)),
+            tooltip: 'Copy Web Link ($broadcastUrl)',
+            onPressed: _copyLink,
+          ),
+          Padding(
+            padding: const EdgeInsets.only(right: 12),
+            child: ElevatedButton.icon(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFFEF6464),
+                foregroundColor: Colors.white,
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+              ),
+              icon: const Icon(Icons.stop, size: 18),
+              label: const Text('Stop Hub'),
+              onPressed: _stopSession,
+            ),
+          ),
+        ],
+      ),
+      body: Column(
+        children: [
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+            color: const Color(0xFF161D23),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Expanded(
+                  child: Row(
+                    children: [
+                      Container(
+                        width: 8,
+                        height: 8,
+                        decoration: const BoxDecoration(color: Color(0xFF2ECC91), shape: BoxShape.circle),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          'Hub Online at $broadcastUrl',
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(fontSize: 12, color: Color(0xFFA7B0B9), fontFamily: 'monospace'),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                Text(
+                  '${devices.length} ${devices.length == 1 ? "Device" : "Devices"} Active',
+                  style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Color(0xFF22BFA2)),
+                ),
+              ],
+            ),
+          ),
+          Expanded(
+            child: devices.isEmpty
+                ? const Center(
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(Icons.sensors, size: 48, color: Colors.grey),
+                        SizedBox(height: 16),
+                        Text(
+                          'Waiting for devices to connect...',
+                          style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                        ),
+                        SizedBox(height: 6),
+                        Text(
+                          'Open VoltMatch on your phones to stream here automatically.',
+                          style: TextStyle(color: Color(0xFFA7B0B9), fontSize: 13),
+                        ),
+                      ],
+                    ),
+                  )
+                : LayoutBuilder(
+                    builder: (context, constraints) {
+                      int crossAxisCount = constraints.maxWidth > 900 ? 3 : (constraints.maxWidth > 600 ? 2 : 1);
+
+                      return GridView.builder(
+                        padding: const EdgeInsets.all(16),
+                        gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                          crossAxisCount: crossAxisCount,
+                          crossAxisSpacing: 16,
+                          mainAxisSpacing: 16,
+                          childAspectRatio: constraints.maxWidth > 600 ? 1.45 : 1.35,
+                        ),
+                        itemCount: devices.length,
+                        itemBuilder: (context, index) {
+                          final d = devices[index];
+                          final id = d['id'] as String;
+                          final history = _deviceHistories[id] ?? List.filled(25, 0.0);
+                          return _buildNativeDeviceCard(d, history);
+                        },
+                      );
+                    },
+                  ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildNativeDeviceCard(Map<String, dynamic> d, List<double> history) {
+    final double watts = (d['watts'] as num?)?.toDouble() ?? 0.0;
+    final rawChg = d['isCharging'];
+    final bool isChg = (rawChg == true || rawChg == 'true' || watts > 0.3);
+    final int bat = (d['batteryPct'] as num?)?.toInt() ?? 0;
+    final double temp = (d['tempC'] as num?)?.toDouble() ?? 0.0;
+    final double maxW = (d['maxChargingWatts'] as num?)?.toDouble() ?? 0.0;
+    final bool isAt80 = bat >= 80 && isChg;
+
+    final tempColor = temp > 40 ? const Color(0xFFEF6464) : (temp > 36 ? const Color(0xFFF5B544) : const Color(0xFF2ECC91));
+
+    return Container(
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: const Color(0xFF161D23),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(
+          color: isChg ? const Color(0xFF22BFA2).withOpacity(0.4) : Colors.white10,
+          width: 1.5,
+        ),
+        boxShadow: const [
+          BoxShadow(color: Colors.black26, blurRadius: 10, offset: Offset(0, 4)),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (isAt80) ...[
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(vertical: 4),
+              margin: const EdgeInsets.only(bottom: 8),
+              decoration: BoxDecoration(
+                color: const Color(0xFFF5B544).withOpacity(0.18),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: const Color(0xFFF5B544)),
+              ),
+              child: const Text(
+                '🔔 80% Reached — Unplug Ready',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: Color(0xFFF5B544), fontWeight: FontWeight.bold, fontSize: 11),
+              ),
+            ),
+          ],
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Expanded(
+                child: Text(
+                  d['name']?.toString() ?? 'Device',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15, color: Colors.white),
+                ),
+              ),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                decoration: BoxDecoration(
+                  color: isChg ? const Color(0xFF2ECC91).withOpacity(0.15) : Colors.white10,
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Text(
+                  isChg ? '⚡ Charging' : 'Unplugged',
+                  style: TextStyle(
+                    color: isChg ? const Color(0xFF2ECC91) : const Color(0xFFA7B0B9),
+                    fontWeight: FontWeight.bold,
+                    fontSize: 10,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          if (maxW > 0) ...[
+            const SizedBox(height: 2),
+            Text(
+              '⚡ Limit: ${maxW.toStringAsFixed(0)}W',
+              style: const TextStyle(fontSize: 11, color: Color(0xFF3DDDB5), fontWeight: FontWeight.bold),
+            ),
+          ],
+          const SizedBox(height: 6),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.baseline,
+            textBaseline: TextBaseline.alphabetic,
+            children: [
+              Text(
+                '${watts.toStringAsFixed(1)} W',
+                style: TextStyle(
+                  fontSize: 34,
+                  fontWeight: FontWeight.w800,
+                  color: isChg ? const Color(0xFF22BFA2) : const Color(0xFFA7B0B9),
+                  letterSpacing: -1,
+                ),
+              ),
+              const SizedBox(width: 10),
+              Text(
+                '${(d["currentMA"] as num?)?.round() ?? 0} mA • ${(d["voltageV"] as num?)?.toStringAsFixed(2) ?? "0.00"} V',
+                style: const TextStyle(fontSize: 12, color: Color(0xFFA7B0B9)),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Expanded(
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(8),
+              child: Container(
+                color: Colors.black26,
+                width: double.infinity,
+                child: CustomPaint(
+                  painter: _SparklinePainter(history),
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              Expanded(
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                  decoration: BoxDecoration(color: Colors.black26, borderRadius: BorderRadius.circular(8)),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.battery_std, size: 16, color: Color(0xFFA7B0B9)),
+                      const SizedBox(width: 4),
+                      Text('$bat%', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                  decoration: BoxDecoration(color: Colors.black26, borderRadius: BorderRadius.circular(8)),
+                  child: Row(
+                    children: [
+                      Icon(Icons.thermostat, size: 16, color: tempColor),
+                      const SizedBox(width: 4),
+                      Text(
+                        '${temp.toStringAsFixed(1)} °C',
+                        style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12, color: tempColor),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _SparklinePainter extends CustomPainter {
+  final List<double> history;
+  _SparklinePainter(this.history);
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (history.isEmpty) return;
+
+    double maxVal = 20.0;
+    for (var w in history) {
+      if (w > maxVal) maxVal = w;
+    }
+    maxVal *= 1.15;
+
+    final paint = Paint()
+      ..color = const Color(0xFF22BFA2)
+      ..strokeWidth = 2.0
+      ..style = PaintingStyle.stroke;
+
+    final path = Path();
+    for (int i = 0; i < history.length; i++) {
+      final x = (i / (history.length - 1)) * size.width;
+      final y = size.height - ((history[i] / maxVal) * (size.height - 8)) - 4;
+
+      if (i == 0) {
+        path.moveTo(x, y);
+      } else {
+        path.lineTo(x, y);
+      }
+    }
+    canvas.drawPath(path, paint);
+  }
+
+  @override
+  bool shouldRepaint(covariant _SparklinePainter oldDelegate) => true;
 }

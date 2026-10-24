@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -20,11 +21,24 @@ class _LiveTesterScreenState extends State<LiveTesterScreen> {
   bool isCharging = false;
   bool hasDataConnection = false;
 
+  // Windows Desktop/Laptop specific state
+  bool isWindowsDesktop = false;
+  bool isLaptop = true;
+  int windowsBatteryPct = 100;
+  double windowsWatts = 0.0;
+
   @override
   void initState() {
     super.initState();
-    _timer = Timer.periodic(const Duration(seconds: 1), (_) => _fetchHardwareStats());
-    _fetchHardwareStats();
+    isWindowsDesktop = Platform.isWindows;
+
+    if (isWindowsDesktop) {
+      _fetchWindowsPowerStats();
+      _timer = Timer.periodic(const Duration(seconds: 3), (_) => _fetchWindowsPowerStats());
+    } else {
+      _fetchHardwareStats();
+      _timer = Timer.periodic(const Duration(seconds: 1), (_) => _fetchHardwareStats());
+    }
   }
 
   @override
@@ -33,6 +47,57 @@ class _LiveTesterScreenState extends State<LiveTesterScreen> {
     super.dispose();
   }
 
+  // Windows Laptop Battery Detection via WMI/ACPI
+  Future<void> _fetchWindowsPowerStats() async {
+    try {
+      final res = await Process.run('powershell', [
+        '-NoProfile',
+        '-WindowStyle', 'Hidden',
+        '-Command',
+        r'''
+        $b = Get-CimInstance Win32_Battery -ErrorAction SilentlyContinue;
+        if ($b) {
+          $s = Get-CimInstance -Namespace root/wmi -ClassName BatteryStatus -ErrorAction SilentlyContinue;
+          $chg = ($b.BatteryStatus -eq 2) -or ($b.BatteryStatus -eq 6) -or ($b.BatteryStatus -eq 7) -or ($s.Charging -eq $true);
+          $v = if ($s.Voltage) { $s.Voltage / 1000.0 } else { if ($b.DesignVoltage) { $b.DesignVoltage / 1000.0 } else { 11.4 } };
+          $rate = if ($s.ChargeRate -gt 0) { $s.ChargeRate / 1000.0 } else { if ($s.DischargeRate -gt 0) { $s.DischargeRate / 1000.0 } else { 45.0 } };
+          Write-Output "$($b.EstimatedChargeRemaining)|$chg|$v|$rate|LAPTOP"
+        } else {
+          Write-Output "DESKTOP_PC"
+        }
+        '''
+      ]);
+
+      final out = res.stdout.toString().trim();
+      if (mounted) {
+        if (out.contains('DESKTOP_PC')) {
+          setState(() {
+            isLaptop = false;
+            isCharging = true;
+            voltageV = 12.0;
+            windowsWatts = 120.0;
+          });
+        } else if (out.contains('|')) {
+          final parts = out.split('|');
+          final bat = int.tryParse(parts[0]) ?? 100;
+          final chg = parts[1].toLowerCase() == 'true';
+          final v = double.tryParse(parts[2]) ?? 11.4;
+          final w = double.tryParse(parts[3]) ?? 45.0;
+
+          setState(() {
+            isLaptop = true;
+            windowsBatteryPct = bat;
+            isCharging = chg;
+            voltageV = v;
+            windowsWatts = chg ? w : 0.0;
+            currentMA = (w / v) * 1000.0;
+          });
+        }
+      }
+    } catch (_) {}
+  }
+
+  // Android Native Hardware Detection
   Future<void> _fetchHardwareStats() async {
     try {
       final Map<dynamic, dynamic> res = await platform.invokeMethod('getLivePowerStats');
@@ -47,36 +112,35 @@ class _LiveTesterScreenState extends State<LiveTesterScreen> {
           tempC = (res['tempC'] as num).toDouble();
           maxWatts = (res['maxChargingWatts'] as num).toDouble();
           hasDataConnection = res['hasDataConnection'] as bool;
-
-          if (!charging) {
-            currentMA = 0.0;
-          } else {
-            currentMA = cMA;
-          }
+          currentMA = charging ? cMA : 0.0;
         });
       }
     } catch (_) {}
   }
 
   Color _getTempColor() {
-    if (tempC < 36.0) return const Color(0xFF2ECC91); // Cool / Optimal
-    if (tempC < 41.0) return const Color(0xFFF5B544); // Warm
-    return const Color(0xFFEF6464); // Thermal Throttling
+    if (tempC < 36.0) return const Color(0xFF2ECC91);
+    if (tempC < 41.0) return const Color(0xFFF5B544);
+    return const Color(0xFFEF6464);
   }
 
   @override
   Widget build(BuildContext context) {
-    final liveWatts = (voltageV * (currentMA / 1000.0));
+    final liveWatts = isWindowsDesktop
+        ? windowsWatts
+        : (voltageV * (currentMA / 1000.0));
 
     return Scaffold(
-      appBar: AppBar(title: const Text('Live Meter & Cable Tester')),
+      appBar: AppBar(
+        title: Text(isWindowsDesktop ? 'PC Power Monitor' : 'Live Meter & Cable Tester'),
+      ),
       body: Center(
         child: ConstrainedBox(
           constraints: const BoxConstraints(maxWidth: 550),
           child: ListView(
             padding: const EdgeInsets.all(20),
             children: [
-              // 1. Live Speed Gauge Card
+              // Speed Gauge Card
               Container(
                 padding: const EdgeInsets.all(24),
                 decoration: BoxDecoration(
@@ -89,7 +153,21 @@ class _LiveTesterScreenState extends State<LiveTesterScreen> {
                 ),
                 child: Column(
                   children: [
-                    if (maxWatts > 0 && isCharging) ...[
+                    if (isWindowsDesktop && !isLaptop) ...[
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF3DDDB5).withOpacity(0.15),
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(color: const Color(0xFF3DDDB5).withOpacity(0.3)),
+                        ),
+                        child: const Text(
+                          '⚡ Desktop Tower (Direct AC Wall Power)',
+                          style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Color(0xFF3DDDB5)),
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                    ] else if (maxWatts > 0 && isCharging) ...[
                       Container(
                         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
                         decoration: BoxDecoration(
@@ -99,15 +177,12 @@ class _LiveTesterScreenState extends State<LiveTesterScreen> {
                         ),
                         child: Text(
                           '⚡ Charger Negotiated Ceiling: ${maxWatts.toStringAsFixed(0)}W',
-                          style: const TextStyle(
-                            fontSize: 12,
-                            fontWeight: FontWeight.bold,
-                            color: Color(0xFF3DDDB5),
-                          ),
+                          style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Color(0xFF3DDDB5)),
                         ),
                       ),
                       const SizedBox(height: 8),
                     ],
+
                     Icon(
                       isCharging ? Icons.bolt : Icons.power_off,
                       size: 46,
@@ -115,19 +190,19 @@ class _LiveTesterScreenState extends State<LiveTesterScreen> {
                     ),
                     const SizedBox(height: 8),
                     Text(
-                      isCharging ? '${liveWatts.toStringAsFixed(1)} W' : 'Not Charging',
-                      style: const TextStyle(
-                        fontSize: 42,
-                        fontWeight: FontWeight.bold,
-                        color: Colors.white,
-                      ),
+                      isCharging
+                          ? (isWindowsDesktop && !isLaptop ? 'AC Active' : '${liveWatts.toStringAsFixed(1)} W')
+                          : 'On Battery Power',
+                      style: const TextStyle(fontSize: 42, fontWeight: FontWeight.bold, color: Colors.white),
                     ),
                     const SizedBox(height: 4),
                     Text(
                       isCharging
-                          ? '${currentMA.toStringAsFixed(0)} mA  •  ${voltageV.toStringAsFixed(2)} V'
-                          : 'Plug in a charger to start measuring',
-                      style: const TextStyle(color: Color(0xFFA7B0B9), fontSize: 15),
+                          ? (isWindowsDesktop && !isLaptop
+                              ? 'Desktop PC plugged directly into wall outlet'
+                              : '${currentMA.toStringAsFixed(0)} mA  •  ${voltageV.toStringAsFixed(2)} V')
+                          : 'Unplugged from charger',
+                      style: const TextStyle(color: Color(0xFFA7B0B9), fontSize: 14),
                     ),
                   ],
                 ),
@@ -135,172 +210,109 @@ class _LiveTesterScreenState extends State<LiveTesterScreen> {
 
               const SizedBox(height: 14),
 
-              // 2. Hardware Telemetry Bar (Temperature & Data Wire)
-              Row(
-                children: [
-                  Expanded(
-                    child: Container(
-                      padding: const EdgeInsets.all(14),
-                      decoration: BoxDecoration(
-                        color: const Color(0xFF161D23),
-                        borderRadius: BorderRadius.circular(14),
-                        border: Border.all(color: Colors.white10),
-                      ),
-                      child: Row(
-                        children: [
-                          Icon(Icons.thermostat, color: _getTempColor(), size: 22),
-                          const SizedBox(width: 8),
-                          Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              const Text('Battery Temp', style: TextStyle(fontSize: 11, color: Colors.grey)),
-                              Text(
-                                '${tempC.toStringAsFixed(1)} °C',
-                                style: TextStyle(
-                                  fontSize: 15,
-                                  fontWeight: FontWeight.bold,
-                                  color: _getTempColor(),
-                                ),
-                              ),
-                            ],
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Container(
-                      padding: const EdgeInsets.all(14),
-                      decoration: BoxDecoration(
-                        color: const Color(0xFF161D23),
-                        borderRadius: BorderRadius.circular(14),
-                        border: Border.all(color: Colors.white10),
-                      ),
-                      child: Row(
-                        children: [
-                          Icon(
-                            hasDataConnection ? Icons.usb : Icons.usb_off,
-                            color: hasDataConnection ? const Color(0xFF2ECC91) : Colors.orangeAccent,
-                            size: 22,
-                          ),
-                          const SizedBox(width: 8),
-                          Expanded(
-                            child: Column(
+              // Telemetry Specs
+              if (!isWindowsDesktop) ...[
+                Row(
+                  children: [
+                    Expanded(
+                      child: Container(
+                        padding: const EdgeInsets.all(14),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF161D23),
+                          borderRadius: BorderRadius.circular(14),
+                          border: Border.all(color: Colors.white10),
+                        ),
+                        child: Row(
+                          children: [
+                            Icon(Icons.thermostat, color: _getTempColor(), size: 22),
+                            const SizedBox(width: 8),
+                            Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
-                                const Text('Data Lines', style: TextStyle(fontSize: 11, color: Colors.grey)),
+                                const Text('Battery Temp', style: TextStyle(fontSize: 11, color: Colors.grey)),
                                 Text(
-                                  hasDataConnection ? 'Verified' : 'Wall/No PC',
-                                  maxLines: 1,
-                                  style: TextStyle(
-                                    fontSize: 14,
-                                    fontWeight: FontWeight.bold,
-                                    color: hasDataConnection ? const Color(0xFF2ECC91) : Colors.orangeAccent,
-                                  ),
+                                  '${tempC.toStringAsFixed(1)} °C',
+                                  style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold, color: _getTempColor()),
                                 ),
                               ],
                             ),
-                          ),
-                        ],
+                          ],
+                        ),
                       ),
                     ),
-                  ),
-                ],
-              ),
-
-              const SizedBox(height: 16),
-
-              // 3. Contextual Notice
-              if (isCharging && liveWatts > 0 && liveWatts < 15) ...[
-                Container(
-                  padding: const EdgeInsets.all(14),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFFF5B544).withOpacity(0.12),
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(color: const Color(0xFFF5B544).withOpacity(0.4)),
-                  ),
-                  child: const Row(
-                    children: [
-                      Icon(Icons.info_outline, color: Color(0xFFF5B544), size: 22),
-                      SizedBox(width: 12),
-                      Expanded(
-                        child: Text(
-                          'Showing 7W - 13W or Lower? Normal for screen-on or battery above 80%. Read below!',
-                          style: TextStyle(
-                            color: Color(0xFFF5B544),
-                            fontSize: 13,
-                            fontWeight: FontWeight.w500,
-                          ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Container(
+                        padding: const EdgeInsets.all(14),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF161D23),
+                          borderRadius: BorderRadius.circular(14),
+                          border: Border.all(color: Colors.white10),
                         ),
+                        child: Row(
+                          children: [
+                            Icon(
+                              hasDataConnection ? Icons.usb : Icons.usb_off,
+                              color: hasDataConnection ? const Color(0xFF2ECC91) : Colors.orangeAccent,
+                              size: 22,
+                            ),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  const Text('Data Lines', style: TextStyle(fontSize: 11, color: Colors.grey)),
+                                  Text(
+                                    hasDataConnection ? 'Verified' : 'Wall/No PC',
+                                    maxLines: 1,
+                                    style: TextStyle(
+                                      fontSize: 14,
+                                      fontWeight: FontWeight.bold,
+                                      color: hasDataConnection ? const Color(0xFF2ECC91) : Colors.orangeAccent,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 16),
+              ] else if (isLaptop) ...[
+                // Laptop Battery Level Card
+                Container(
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF161D23),
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(color: Colors.white10),
+                  ),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.laptop_chromebook, color: Color(0xFF22BFA2), size: 28),
+                      const SizedBox(width: 12),
+                      Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Text('Laptop Battery Status', style: TextStyle(fontSize: 12, color: Colors.grey)),
+                          Text(
+                            '$windowsBatteryPct% • ${isCharging ? "Charging via AC" : "Discharging on Battery"}',
+                            style: const TextStyle(fontSize: 15, fontWeight: FontWeight.bold),
+                          ),
+                        ],
                       ),
                     ],
                   ),
                 ),
                 const SizedBox(height: 16),
               ],
-
-              // 4. In-App Troubleshooting Guide
-              Container(
-                decoration: BoxDecoration(
-                  color: const Color(0xFF161D23),
-                  borderRadius: BorderRadius.circular(16),
-                  border: Border.all(color: Colors.white12),
-                ),
-                child: ExpansionTile(
-                  initiallyExpanded: false,
-                  shape: const Border(),
-                  leading: const Icon(Icons.help_outline, color: Color(0xFF22BFA2)),
-                  title: const Text(
-                    'Why is Wattage lower than advertised?',
-                    style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold),
-                  ),
-                  children: [
-                    Padding(
-                      padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-                      child: Column(
-                        children: [
-                          _buildPoint(Icons.stay_current_portrait, '1. Screen-On Thermal Brake',
-                              'Phones cut speed to ~7W-10W while the screen is on. Full speed occurs only when the screen is locked and OFF.'),
-                          const Divider(color: Colors.white10, height: 20),
-                          _buildPoint(Icons.battery_charging_full, '2. The 70%-80% Battery Rule',
-                              'Fast charging only runs full blast below 60%. Above 80%, power trickles down to protect battery life.'),
-                          const Divider(color: Colors.white10, height: 20),
-                          _buildPoint(Icons.thermostat, '3. Battery Temperature',
-                              'If your battery warms above 38°C, the phone automatically dials back charging power to cool itself.'),
-                          const Divider(color: Colors.white10, height: 20),
-                          _buildPoint(Icons.cable, '4. Cable Rating',
-                              'Standard 2A cables bottleneck fast chargers down to 10W-15W. High-power charging requires a 4A/5A cable.'),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-              ),
             ],
           ),
         ),
       ),
-    );
-  }
-
-  Widget _buildPoint(IconData icon, String title, String desc) {
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Icon(icon, size: 18, color: const Color(0xFF3DDDB5)),
-        const SizedBox(width: 10),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(title, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: Colors.white)),
-              const SizedBox(height: 2),
-              Text(desc, style: const TextStyle(color: Color(0xFFA7B0B9), fontSize: 12, height: 1.3)),
-            ],
-          ),
-        ),
-      ],
     );
   }
 }
