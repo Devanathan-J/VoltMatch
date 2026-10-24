@@ -163,8 +163,6 @@ flutter run
 code
 Bash
 flutter run -d chrome
+
 📄 License
 This project is licensed under the MIT License — see the LICENSE file for details.
-code
-Code
----
