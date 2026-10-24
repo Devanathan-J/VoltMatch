@@ -168,12 +168,3 @@ This project is licensed under the MIT License — see the LICENSE file for deta
 code
 Code
 ---
-
-### How to push this update to GitHub:
-
-Open your terminal in VS Code and run:
-
-```powershell
-git add README.md
-git commit -m "Update documentation with multi-device hub, circular logo, and charging guide"
-git push
