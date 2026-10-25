@@ -1007,68 +1007,112 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
           child: ListView(
             padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
             children: [
-              // Segmented Mode Switcher (Allows switching on both platforms)
-              Container(
-                margin: const EdgeInsets.only(bottom: 20),
-                padding: const EdgeInsets.all(4),
-                decoration: BoxDecoration(
-                  color: const Color(0xFF161D23),
-                  borderRadius: BorderRadius.circular(14),
-                  border: Border.all(color: Colors.white10),
-                ),
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: GestureDetector(
-                        onTap: () {
-                          setState(() => isHostMode = true);
-                          _stopDiscovery();
-                        },
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(vertical: 10),
-                          decoration: BoxDecoration(
-                            color: isHostMode ? const Color(0xFF22BFA2) : Colors.transparent,
-                            borderRadius: BorderRadius.circular(10),
-                          ),
-                          child: Center(
-                            child: Text(
-                              'Central Hub',
-                              style: TextStyle(
-                                color: isHostMode ? Colors.black : Colors.white70,
-                                fontWeight: FontWeight.bold,
-                                fontSize: 14,
+              // Segmented Mode Switcher (LOCKED WHILE SESSION IS RUNNING)
+              Opacity(
+                opacity: isRunning ? 0.55 : 1.0,
+                child: Container(
+                  margin: const EdgeInsets.only(bottom: 20),
+                  padding: const EdgeInsets.all(4),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF161D23),
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(color: Colors.white10),
+                  ),
+                  child: Row(
+                    children: [
+                      // 1. Central Hub Option
+                      Expanded(
+                        child: GestureDetector(
+                          onTap: isRunning
+                              ? () {
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    const SnackBar(
+                                      content: Text('Please stop the active session before switching modes.'),
+                                      duration: Duration(seconds: 2),
+                                    ),
+                                  );
+                                }
+                              : () {
+                                  setState(() => isHostMode = true);
+                                  _stopDiscovery();
+                                },
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(vertical: 10),
+                            decoration: BoxDecoration(
+                              color: isHostMode ? const Color(0xFF22BFA2) : Colors.transparent,
+                              borderRadius: BorderRadius.circular(10),
+                            ),
+                            child: Center(
+                              child: Row(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  if (isRunning && isHostMode)
+                                    const Padding(
+                                      padding: EdgeInsets.only(right: 6),
+                                      child: Icon(Icons.lock_outline, size: 14, color: Colors.black),
+                                    ),
+                                  Text(
+                                    'Central Hub',
+                                    style: TextStyle(
+                                      color: isHostMode ? Colors.black : Colors.white70,
+                                      fontWeight: FontWeight.bold,
+                                      fontSize: 14,
+                                    ),
+                                  ),
+                                ],
                               ),
                             ),
                           ),
                         ),
                       ),
-                    ),
-                    Expanded(
-                      child: GestureDetector(
-                        onTap: () {
-                          setState(() => isHostMode = false);
-                          _startAutoDiscovery();
-                        },
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(vertical: 10),
-                          decoration: BoxDecoration(
-                            color: !isHostMode ? const Color(0xFF22BFA2) : Colors.transparent,
-                            borderRadius: BorderRadius.circular(10),
-                          ),
-                          child: Center(
-                            child: Text(
-                              'Join as Probe',
-                              style: TextStyle(
-                                color: !isHostMode ? Colors.black : Colors.white70,
-                                fontWeight: FontWeight.bold,
-                                fontSize: 14,
+
+                      // 2. Join as Probe Option
+                      Expanded(
+                        child: GestureDetector(
+                          onTap: isRunning
+                              ? () {
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    const SnackBar(
+                                      content: Text('Please stop the active session before switching modes.'),
+                                      duration: Duration(seconds: 2),
+                                    ),
+                                  );
+                                }
+                              : () {
+                                  setState(() => isHostMode = false);
+                                  _startAutoDiscovery();
+                                },
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(vertical: 10),
+                            decoration: BoxDecoration(
+                              color: !isHostMode ? const Color(0xFF22BFA2) : Colors.transparent,
+                              borderRadius: BorderRadius.circular(10),
+                            ),
+                            child: Center(
+                              child: Row(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  if (isRunning && !isHostMode)
+                                    const Padding(
+                                      padding: EdgeInsets.only(right: 6),
+                                      child: Icon(Icons.lock_outline, size: 14, color: Colors.black),
+                                    ),
+                                  Text(
+                                    'Join as Probe',
+                                    style: TextStyle(
+                                      color: !isHostMode ? Colors.black : Colors.white70,
+                                      fontWeight: FontWeight.bold,
+                                      fontSize: 14,
+                                    ),
+                                  ),
+                                ],
                               ),
                             ),
                           ),
                         ),
                       ),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
               ),
 
