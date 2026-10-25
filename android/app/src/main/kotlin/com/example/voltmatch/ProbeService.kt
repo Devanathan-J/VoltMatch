@@ -4,6 +4,7 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
@@ -25,9 +26,26 @@ class ProbeService : Service() {
 
     private val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var wakeLock: PowerManager.WakeLock? = null
+    private var wifiLock: WifiManager.WifiLock? = null
+
     private var targetHubIp: String? = null
-    private var consecutiveFailures = 0
+    private var isDiscovering = false
+    private var isCablePluggedIn = false
     private val deviceName = "${Build.MANUFACTURER.replaceFirstChar { it.uppercase() }} ${Build.MODEL}"
+
+    // Hardware Event Receiver (Catches the exact moment cable is connected/disconnected)
+    private val powerReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            when (intent?.action) {
+                Intent.ACTION_POWER_CONNECTED -> {
+                    isCablePluggedIn = true
+                }
+                Intent.ACTION_POWER_DISCONNECTED -> {
+                    isCablePluggedIn = false
+                }
+            }
+        }
+    }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -35,37 +53,99 @@ class ProbeService : Service() {
         super.onCreate()
         isRunning = true
         createNotificationChannel()
-        startForeground(NOTIFICATION_ID, buildNotification("Scanning for Hub on Wi-Fi..."))
+
+        // Register immediate power connection listeners
+        val powerFilter = IntentFilter().apply {
+            addAction(Intent.ACTION_POWER_CONNECTED)
+            addAction(Intent.ACTION_POWER_DISCONNECTED)
+        }
+        registerReceiver(powerReceiver, powerFilter)
+
+        startForeground(NOTIFICATION_ID, buildNotification("Ready — Waiting for charger..."))
 
         val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
         wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "VoltMatch::BackgroundProbeWakeLock")
-        wakeLock?.acquire(60 * 60 * 1000L) // 1 hour max
+        wakeLock?.acquire(60 * 60 * 1000L)
+
+        val wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+        wifiLock = wifiManager.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "VoltMatch::WifiHighPerfLock")
+        wifiLock?.acquire()
 
         VoltMatchTileService.refreshTile(this)
         startAutoDiscoveryAndStreaming()
     }
 
+    // 4-LAYER HARDWARE CHARGER DETECTION (Immune to Vivo/Samsung background broadcast blocks)
+    private fun isChargerConnected(): Boolean {
+        // 1. Direct hardware connection event
+        if (isCablePluggedIn) return true
+
+        // 2. Direct BatteryManager API (Kernel level query)
+        val bm = getSystemService(Context.BATTERY_SERVICE) as BatteryManager
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && bm.isCharging) {
+            return true
+        }
+
+        // 3. Direct Hardware Property (API 26+)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val statusProp = bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_STATUS)
+            if (statusProp == BatteryManager.BATTERY_STATUS_CHARGING ||
+                statusProp == BatteryManager.BATTERY_STATUS_FULL) {
+                return true
+            }
+        }
+
+        // 4. Fallback sticky intent
+        try {
+            val batteryStatus = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+            val plugged = batteryStatus?.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0) ?: 0
+            val status = batteryStatus?.getIntExtra(BatteryManager.EXTRA_STATUS, -1) ?: -1
+
+            if (plugged > 0) return true
+            if (status == BatteryManager.BATTERY_STATUS_CHARGING || status == BatteryManager.BATTERY_STATUS_FULL) return true
+        } catch (e: Exception) {}
+
+        return false
+    }
+
     private fun startAutoDiscoveryAndStreaming() {
         serviceScope.launch {
-            discoverHub()
-
             while (isActive && isRunning) {
-                targetHubIp?.let { ip ->
-                    val payload = sampleBatteryTelemetry()
-                    sendTelemetry(ip, payload)
-                } ?: run {
+                if (!isChargerConnected()) {
+                    updateNotification("Paused — Connect charger to start streaming")
+                    delay(1000)
+                    continue
+                }
+
+                if (targetHubIp == null && !isDiscovering) {
                     discoverHub()
                 }
+
+                targetHubIp?.let { ip ->
+                    val payload = sampleBatteryTelemetry()
+                    val success = sendTelemetry(ip, payload)
+                    if (success) {
+                        updateNotification("Streaming to $ip (Charging)")
+                    } else {
+                        if (!isDiscovering) {
+                            serviceScope.launch { discoverHub() }
+                        }
+                    }
+                }
+
                 delay(400)
             }
         }
     }
 
     private suspend fun discoverHub() {
+        if (isDiscovering) return
+        isDiscovering = true
+
         withContext(Dispatchers.IO) {
             // 1. Quick UDP listener
             try {
-                val socket = DatagramSocket(8082).apply { soTimeout = 1500 }
+                val socket = DatagramSocket(8082).apply { soTimeout = 1200 }
                 val buf = ByteArray(1024)
                 val packet = DatagramPacket(buf, buf.size)
                 socket.receive(packet)
@@ -74,41 +154,43 @@ class ProbeService : Service() {
                 if (json.optString("type") == "VOLTMATCH_HUB") {
                     targetHubIp = json.optString("ip")
                     socket.close()
-                    consecutiveFailures = 0
-                    updateNotification("Streaming to $targetHubIp")
+                    isDiscovering = false
                     return@withContext
                 }
                 socket.close()
             } catch (e: Exception) {}
 
-            // 2. Subnet scan fallback
+            // 2. Parallel Subnet scan fallback
             val localIp = getLocalIpAddress()
             if (localIp != null && localIp.contains(".")) {
                 val subnet = localIp.substringBeforeLast(".")
-                for (i in 1..254) {
-                    val testIp = "$subnet.$i"
-                    if (testIp == localIp) continue
-                    try {
-                        val url = URL("http://$testIp:8080/api/discover")
-                        val conn = (url.openConnection() as HttpURLConnection).apply {
-                            connectTimeout = 120
-                            readTimeout = 120
-                        }
-                        if (conn.responseCode == 200) {
-                            val text = conn.inputStream.bufferedReader().readText()
-                            val json = JSONObject(text)
-                            if (json.optBoolean("hub")) {
-                                targetHubIp = testIp
+                coroutineScope {
+                    for (i in 1..254) {
+                        if (targetHubIp != null) break
+                        val testIp = "$subnet.$i"
+                        if (testIp == localIp) continue
+
+                        launch {
+                            try {
+                                val url = URL("http://$testIp:8080/api/discover")
+                                val conn = (url.openConnection() as HttpURLConnection).apply {
+                                    connectTimeout = 300
+                                    readTimeout = 300
+                                }
+                                if (conn.responseCode == 200) {
+                                    val text = conn.inputStream.bufferedReader().readText()
+                                    val json = JSONObject(text)
+                                    if (json.optBoolean("hub")) {
+                                        targetHubIp = testIp
+                                    }
+                                }
                                 conn.disconnect()
-                                consecutiveFailures = 0
-                                updateNotification("Streaming to $targetHubIp")
-                                break
-                            }
+                            } catch (e: Exception) {}
                         }
-                        conn.disconnect()
-                    } catch (e: Exception) {}
+                    }
                 }
             }
+            isDiscovering = false
         }
     }
 
@@ -124,7 +206,8 @@ class ProbeService : Service() {
 
         val status = batteryStatus?.getIntExtra(BatteryManager.EXTRA_STATUS, -1) ?: -1
         val isCharging = status == BatteryManager.BATTERY_STATUS_CHARGING ||
-                         status == BatteryManager.BATTERY_STATUS_FULL
+                         status == BatteryManager.BATTERY_STATUS_FULL ||
+                         isCablePluggedIn
 
         val level = batteryStatus?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
         val scale = batteryStatus?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: -1
@@ -155,15 +238,16 @@ class ProbeService : Service() {
         }
     }
 
-    private fun sendTelemetry(hubIp: String, json: JSONObject) {
-        try {
+    private fun sendTelemetry(hubIp: String, json: JSONObject): Boolean {
+        return try {
             val url = URL("http://$hubIp:8080/api/push")
             val conn = (url.openConnection() as HttpURLConnection).apply {
                 requestMethod = "POST"
                 doOutput = true
-                connectTimeout = 1500
-                readTimeout = 1500
+                connectTimeout = 1000
+                readTimeout = 1000
                 setRequestProperty("Content-Type", "application/json; charset=utf-8")
+                setRequestProperty("Connection", "Keep-Alive")
             }
 
             val bytes = json.toString().toByteArray(Charsets.UTF_8)
@@ -174,22 +258,14 @@ class ProbeService : Service() {
 
             val code = conn.responseCode
             if (code == 200) {
-                consecutiveFailures = 0
                 conn.inputStream.close()
+                true
             } else {
                 conn.errorStream?.close()
-                consecutiveFailures++
-            }
-            conn.disconnect()
-
-            if (consecutiveFailures >= 5) {
-                targetHubIp = null
+                false
             }
         } catch (e: Exception) {
-            consecutiveFailures++
-            if (consecutiveFailures >= 5) {
-                targetHubIp = null
-            }
+            false
         }
     }
 
@@ -235,8 +311,15 @@ class ProbeService : Service() {
     override fun onDestroy() {
         isRunning = false
         serviceScope.cancel()
+        try {
+            unregisterReceiver(powerReceiver)
+        } catch (e: Exception) {}
+
         if (wakeLock?.isHeld == true) {
             wakeLock?.release()
+        }
+        if (wifiLock?.isHeld == true) {
+            wifiLock?.release()
         }
         VoltMatchTileService.refreshTile(this)
         super.onDestroy()
