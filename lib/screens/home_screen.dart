@@ -14,13 +14,18 @@ class HomeScreen extends StatefulWidget {
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen> {
+class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   static const platform = MethodChannel('com.voltmatch/hardware');
+
+  bool _isNotifActive = false;
+  bool _isBatActive = false;
+  StateSetter? _dialogSetState;
 
   @override
   void initState() {
     super.initState();
-    // Check if this is the first launch on Android
+    WidgetsBinding.instance.addObserver(this);
+
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (Platform.isAndroid) {
         _checkFirstTimePermissions();
@@ -28,11 +33,41 @@ class _HomeScreenState extends State<HomeScreen> {
     });
   }
 
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  // When returning from Android settings, automatically refresh the checkmarks!
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed && Platform.isAndroid) {
+      _refreshPermissionStatuses();
+    }
+  }
+
+  Future<void> _refreshPermissionStatuses() async {
+    try {
+      final notif = await platform.invokeMethod<bool>('areNotificationsEnabled') ?? false;
+      final bat = await platform.invokeMethod<bool>('isBatteryOptimizationIgnored') ?? false;
+
+      if (mounted) {
+        setState(() {
+          _isNotifActive = notif;
+          _isBatActive = bat;
+        });
+        _dialogSetState?.call(() {});
+      }
+    } catch (_) {}
+  }
+
   Future<void> _checkFirstTimePermissions() async {
     final prefs = await SharedPreferences.getInstance();
     final bool hasShownDialog = prefs.getBool('has_shown_battery_setup') ?? false;
 
     if (!hasShownDialog && mounted) {
+      await _refreshPermissionStatuses();
       _showFirstTimeSetupDialog();
     }
   }
@@ -43,6 +78,8 @@ class _HomeScreenState extends State<HomeScreen> {
       barrierDismissible: false,
       builder: (ctx) => StatefulBuilder(
         builder: (context, setModalState) {
+          _dialogSetState = setModalState;
+
           return AlertDialog(
             backgroundColor: const Color(0xFF161D23),
             shape: RoundedRectangleBorder(
@@ -64,12 +101,12 @@ class _HomeScreenState extends State<HomeScreen> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 const Text(
-                  'To let VoltMatch stream charging wattage with your screen turned off and chime at 80%, please enable these two quick settings:',
+                  'To let VoltMatch stream charging wattage with your screen turned off and chime at 80%, please enable these settings:',
                   style: TextStyle(color: Color(0xFFA7B0B9), fontSize: 13, height: 1.4),
                 ),
                 const SizedBox(height: 16),
 
-                // Button 1: Notification Permission
+                // 1. Universal Notification Permission (Samsung A21s & iQOO Z6)
                 ListTile(
                   contentPadding: EdgeInsets.zero,
                   leading: Container(
@@ -81,23 +118,42 @@ class _HomeScreenState extends State<HomeScreen> {
                     child: const Icon(Icons.notifications_active, color: Color(0xFF22BFA2), size: 20),
                   ),
                   title: const Text('1. Notifications', style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold)),
-                  subtitle: const Text('For Quick Settings tile & 80% chime', style: TextStyle(fontSize: 11, color: Color(0xFFA7B0B9))),
-                  trailing: ElevatedButton(
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: const Color(0xFF22BFA2),
-                      foregroundColor: Colors.black,
-                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                    ),
-                    onPressed: () {
-                      platform.invokeMethod('requestNotificationPermission');
-                    },
-                    child: const Text('Enable', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
+                  subtitle: Text(
+                    _isNotifActive ? 'Active and enabled' : 'Required for Quick Tile & 80% chime',
+                    style: TextStyle(fontSize: 11, color: _isNotifActive ? const Color(0xFF2ECC91) : const Color(0xFFA7B0B9)),
                   ),
+                  trailing: _isNotifActive
+                      ? Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF2ECC91).withOpacity(0.15),
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          child: const Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(Icons.check, size: 14, color: Color(0xFF2ECC91)),
+                              SizedBox(width: 4),
+                              Text('Active', style: TextStyle(color: Color(0xFF2ECC91), fontSize: 11, fontWeight: FontWeight.bold)),
+                            ],
+                          ),
+                        )
+                      : ElevatedButton(
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: const Color(0xFF22BFA2),
+                            foregroundColor: Colors.black,
+                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                          ),
+                          onPressed: () async {
+                            await platform.invokeMethod('requestNotificationPermission');
+                          },
+                          child: const Text('Enable', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
+                        ),
                 ),
 
                 const Divider(color: Colors.white10),
 
-                // Button 2: Unrestricted Battery Setting
+                // 2. Unrestricted Battery
                 ListTile(
                   contentPadding: EdgeInsets.zero,
                   leading: Container(
@@ -109,23 +165,42 @@ class _HomeScreenState extends State<HomeScreen> {
                     child: const Icon(Icons.battery_charging_full, color: Color(0xFF3DDDB5), size: 20),
                   ),
                   title: const Text('2. Unrestricted Battery', style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold)),
-                  subtitle: const Text('Stops Android from putting Wi-Fi to sleep', style: TextStyle(fontSize: 11, color: Color(0xFFA7B0B9))),
-                  trailing: ElevatedButton(
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: const Color(0xFF3DDDB5),
-                      foregroundColor: Colors.black,
-                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                    ),
-                    onPressed: () {
-                      platform.invokeMethod('requestIgnoreBatteryOptimization');
-                    },
-                    child: const Text('Set', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
+                  subtitle: Text(
+                    _isBatActive ? 'Battery is unrestricted' : 'Stops Android from putting Wi-Fi to sleep',
+                    style: TextStyle(fontSize: 11, color: _isBatActive ? const Color(0xFF2ECC91) : const Color(0xFFA7B0B9)),
                   ),
+                  trailing: _isBatActive
+                      ? Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF2ECC91).withOpacity(0.15),
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          child: const Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(Icons.check, size: 14, color: Color(0xFF2ECC91)),
+                              SizedBox(width: 4),
+                              Text('Active', style: TextStyle(color: Color(0xFF2ECC91), fontSize: 11, fontWeight: FontWeight.bold)),
+                            ],
+                          ),
+                        )
+                      : ElevatedButton(
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: const Color(0xFF3DDDB5),
+                            foregroundColor: Colors.black,
+                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                          ),
+                          onPressed: () async {
+                            await platform.invokeMethod('requestIgnoreBatteryOptimization');
+                          },
+                          child: const Text('Set', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
+                        ),
                 ),
 
                 const Divider(color: Colors.white10),
 
-                // Button 3: App Info Settings ("Pause if unused")
+                // 3. App Settings ("Pause if unused")
                 ListTile(
                   contentPadding: EdgeInsets.zero,
                   leading: Container(
@@ -137,12 +212,12 @@ class _HomeScreenState extends State<HomeScreen> {
                     child: const Icon(Icons.settings, color: Colors.white70, size: 20),
                   ),
                   title: const Text('3. App Settings', style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold)),
-                  subtitle: const Text('Disable "Pause app activity if unused"', style: TextStyle(fontSize: 11, color: Color(0xFFA7B0B9))),
+                  subtitle: const Text('Turn off "Pause activity if unused"', style: TextStyle(fontSize: 11, color: Color(0xFFA7B0B9))),
                   trailing: OutlinedButton(
                     style: OutlinedButton.styleFrom(
                       foregroundColor: Colors.white,
                       side: const BorderSide(color: Colors.white24),
-                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                     ),
                     onPressed: () {
                       platform.invokeMethod('openAppInfoSettings');
@@ -157,6 +232,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 onPressed: () async {
                   final prefs = await SharedPreferences.getInstance();
                   await prefs.setBool('has_shown_battery_setup', true);
+                  _dialogSetState = null;
                   if (mounted) Navigator.pop(ctx);
                 },
                 child: const Text(
@@ -437,7 +513,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
               const SizedBox(height: 28),
 
-              // Educational Tip
+              // Educational Tip Card
               Container(
                 padding: const EdgeInsets.all(20),
                 decoration: BoxDecoration(

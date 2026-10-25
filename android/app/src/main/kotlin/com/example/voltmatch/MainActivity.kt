@@ -1,5 +1,6 @@
-package com.example.voltmatch // (Keep your package name if different)
+package com.example.voltmatch
 
+import android.app.NotificationManager
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
@@ -7,6 +8,7 @@ import android.hardware.usb.UsbManager
 import android.os.BatteryManager
 import android.os.Build
 import android.os.PowerManager
+import android.provider.Settings
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -22,7 +24,43 @@ class MainActivity: FlutterActivity() {
 
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL).setMethodCallHandler { call, result ->
             when (call.method) {
-                // 1. BATTERY OPTIMIZATION & PERMISSION CONTROLS
+                // 1. UNIVERSAL NOTIFICATION CHECK & REQUEST (Works on Android 10, 11, 12, 13, 14+)
+                "areNotificationsEnabled" -> {
+                    val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                        result.success(nm.areNotificationsEnabled())
+                    } else {
+                        result.success(true)
+                    }
+                }
+
+                "requestNotificationPermission" -> {
+                    val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        // Android 13+ system dialog
+                        if (!nm.areNotificationsEnabled()) {
+                            requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 101)
+                        }
+                        result.success(true)
+                    } else {
+                        // Android 10, 11, 12 (Samsung A21s, etc.) - Opens Notification Settings directly!
+                        try {
+                            val intent = Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
+                                putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
+                            }
+                            startActivity(intent)
+                            result.success(true)
+                        } catch (e: Exception) {
+                            val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                                data = android.net.Uri.parse("package:$packageName")
+                            }
+                            startActivity(intent)
+                            result.success(false)
+                        }
+                    }
+                }
+
+                // 2. UNIVERSAL BATTERY OPTIMIZATION CONTROLS
                 "isBatteryOptimizationIgnored" -> {
                     val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
@@ -35,13 +73,14 @@ class MainActivity: FlutterActivity() {
                 "requestIgnoreBatteryOptimization" -> {
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                         try {
-                            val intent = Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                            val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
                                 data = android.net.Uri.parse("package:$packageName")
                             }
                             startActivity(intent)
                             result.success(true)
                         } catch (e: Exception) {
-                            val intent = Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                            // Fallback to app details
+                            val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
                                 data = android.net.Uri.parse("package:$packageName")
                             }
                             startActivity(intent)
@@ -53,23 +92,14 @@ class MainActivity: FlutterActivity() {
                 }
 
                 "openAppInfoSettings" -> {
-                    val intent = Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                    val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
                         data = android.net.Uri.parse("package:$packageName")
                     }
                     startActivity(intent)
                     result.success(true)
                 }
 
-                "requestNotificationPermission" -> {
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                        requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 101)
-                        result.success(true)
-                    } else {
-                        result.success(true)
-                    }
-                }
-
-                // 2. HARDWARE AUTO-DETECTION (MobileModels Database)
+                // 3. HARDWARE AUTO-DETECTION
                 "getDeviceInfo" -> {
                     val manufacturer = Build.MANUFACTURER.replaceFirstChar { it.uppercase() }
                     val model = Build.MODEL
@@ -85,18 +115,14 @@ class MainActivity: FlutterActivity() {
                     ))
                 }
 
-                // 3. LIVE POWER & HARDWARE TELEMETRY
+                // 4. LIVE POWER TELEMETRY
                 "getLivePowerStats" -> {
                     val batteryManager = getSystemService(Context.BATTERY_SERVICE) as BatteryManager
                     val ifilter = IntentFilter(Intent.ACTION_BATTERY_CHANGED)
                     val batteryStatus = registerReceiver(null, ifilter)
 
                     val rawCurrent = abs(batteryManager.getIntProperty(BatteryManager.BATTERY_PROPERTY_CURRENT_NOW))
-                    val currentInMA = if (rawCurrent > 10000) {
-                        rawCurrent / 1000.0
-                    } else {
-                        rawCurrent.toDouble()
-                    }
+                    val currentInMA = if (rawCurrent > 10000) rawCurrent / 1000.0 else rawCurrent.toDouble()
 
                     val voltageMv = batteryStatus?.getIntExtra(BatteryManager.EXTRA_VOLTAGE, -1) ?: 0
                     val voltageInV = voltageMv / 1000.0
@@ -115,19 +141,15 @@ class MainActivity: FlutterActivity() {
                     val maxCurrentUa = batteryStatus?.getIntExtra("max_charging_current", -1) ?: -1
                     val maxVoltageUv = batteryStatus?.getIntExtra("max_charging_voltage", -1) ?: -1
                     var maxWatts = 0.0
-                    var maxV = 0.0
-                    var maxA = 0.0
                     if (maxCurrentUa > 0 && maxVoltageUv > 0) {
-                        maxV = maxVoltageUv / 1000000.0
-                        maxA = maxCurrentUa / 1000000.0
-                        maxWatts = maxV * maxA
+                        maxWatts = (maxVoltageUv / 1000000.0) * (maxCurrentUa / 1000000.0)
                     }
 
                     val usbFilter = IntentFilter("android.hardware.usb.action.USB_STATE")
                     val usbStatus = registerReceiver(null, usbFilter)
                     val hasDataConnection = usbStatus?.extras?.getBoolean("connected") ?: false
 
-                    val response = mapOf(
+                    result.success(mapOf(
                         "deviceName" to deviceName,
                         "currentMA" to currentInMA,
                         "voltageV" to voltageInV,
@@ -135,14 +157,11 @@ class MainActivity: FlutterActivity() {
                         "batteryPct" to batteryPct,
                         "tempC" to tempC,
                         "maxChargingWatts" to maxWatts,
-                        "maxVoltageV" to maxV,
-                        "maxCurrentA" to maxA,
                         "hasDataConnection" to hasDataConnection
-                    )
-                    result.success(response)
+                    ))
                 }
 
-                // 4. BACKGROUND WAKELOCK
+                // 5. WAKELOCKS
                 "acquireWakeLock" -> {
                     val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
                     wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "VoltMatch::MonitorWakelock")
@@ -150,18 +169,13 @@ class MainActivity: FlutterActivity() {
                     result.success(true)
                 }
 
-                // 5. RELEASE WAKELOCK
                 "releaseWakeLock" -> {
-                    if (wakeLock?.isHeld == true) {
-                        wakeLock?.release()
-                    }
+                    if (wakeLock?.isHeld == true) wakeLock?.release()
                     result.success(true)
                 }
 
                 // 6. QUICK SETTINGS TILE SYNC
-                "isProbeServiceRunning" -> {
-                    result.success(ProbeService.isRunning)
-                }
+                "isProbeServiceRunning" -> result.success(ProbeService.isRunning)
 
                 "stopProbeService" -> {
                     stopService(Intent(this, ProbeService::class.java))

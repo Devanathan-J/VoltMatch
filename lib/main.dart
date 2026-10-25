@@ -1,10 +1,8 @@
 import 'package:flutter/material.dart';
-import 'services/catalog_service.dart';
-import 'screens/home_screen.dart';
+import 'screens/splash_screen.dart';
 
-void main() async {
+void main() {
   WidgetsFlutterBinding.ensureInitialized();
-  await CatalogService.loadCatalog();
   runApp(const VoltMatchApp());
 }
 
@@ -31,7 +29,7 @@ class VoltMatchApp extends StatelessWidget {
           elevation: 0,
         ),
       ),
-      home: const HomeScreen(),
+      home: const SplashScreen(),
     );
   }
 }

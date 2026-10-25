@@ -30,18 +30,33 @@ class ProbeService : Service() {
 
     private var targetHubIp: String? = null
     private var isDiscovering = false
-    private var isCablePluggedIn = false
+    private var lastNotificationText = ""
+    private var failCount = 0
+
+    @Volatile private var isChargerPlugged = false
+    @Volatile private var latestBatteryIntent: Intent? = null
+
     private val deviceName = "${Build.MANUFACTURER.replaceFirstChar { it.uppercase() }} ${Build.MODEL}"
 
-    // Hardware Event Receiver (Catches the exact moment cable is connected/disconnected)
-    private val powerReceiver = object : BroadcastReceiver() {
+    // Dedicated Power & Battery Receiver
+    private val batteryReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
-            when (intent?.action) {
+            if (intent == null) return
+            latestBatteryIntent = intent
+
+            when (intent.action) {
                 Intent.ACTION_POWER_CONNECTED -> {
-                    isCablePluggedIn = true
+                    isChargerPlugged = true
                 }
                 Intent.ACTION_POWER_DISCONNECTED -> {
-                    isCablePluggedIn = false
+                    isChargerPlugged = false
+                }
+                Intent.ACTION_BATTERY_CHANGED -> {
+                    val plugged = intent.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0)
+                    val status = intent.getIntExtra(BatteryManager.EXTRA_STATUS, -1)
+                    isChargerPlugged = plugged > 0 ||
+                                       status == BatteryManager.BATTERY_STATUS_CHARGING ||
+                                       status == BatteryManager.BATTERY_STATUS_FULL
                 }
             }
         }
@@ -54,14 +69,26 @@ class ProbeService : Service() {
         isRunning = true
         createNotificationChannel()
 
-        // Register immediate power connection listeners
-        val powerFilter = IntentFilter().apply {
+        // 1. Load last known Hub IP from memory so it connects in 0 seconds!
+        val prefs = getSharedPreferences("voltmatch_probe_prefs", Context.MODE_PRIVATE)
+        targetHubIp = prefs.getString("last_known_hub_ip", null)
+
+        val filter = IntentFilter().apply {
             addAction(Intent.ACTION_POWER_CONNECTED)
             addAction(Intent.ACTION_POWER_DISCONNECTED)
+            addAction(Intent.ACTION_BATTERY_CHANGED)
         }
-        registerReceiver(powerReceiver, powerFilter)
+        val stickyIntent = applicationContext.registerReceiver(batteryReceiver, filter)
+        if (stickyIntent != null) {
+            latestBatteryIntent = stickyIntent
+            val plugged = stickyIntent.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0)
+            val status = stickyIntent.getIntExtra(BatteryManager.EXTRA_STATUS, -1)
+            isChargerPlugged = plugged > 0 ||
+                               status == BatteryManager.BATTERY_STATUS_CHARGING ||
+                               status == BatteryManager.BATTERY_STATUS_FULL
+        }
 
-        startForeground(NOTIFICATION_ID, buildNotification("Ready — Waiting for charger..."))
+        startForeground(NOTIFICATION_ID, buildNotification("Initializing Probe..."))
 
         val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
         wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "VoltMatch::BackgroundProbeWakeLock")
@@ -75,61 +102,52 @@ class ProbeService : Service() {
         startAutoDiscoveryAndStreaming()
     }
 
-    // 4-LAYER HARDWARE CHARGER DETECTION (Immune to Vivo/Samsung background broadcast blocks)
-    private fun isChargerConnected(): Boolean {
-        // 1. Direct hardware connection event
-        if (isCablePluggedIn) return true
-
-        // 2. Direct BatteryManager API (Kernel level query)
-        val bm = getSystemService(Context.BATTERY_SERVICE) as BatteryManager
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && bm.isCharging) {
-            return true
-        }
-
-        // 3. Direct Hardware Property (API 26+)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val statusProp = bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_STATUS)
-            if (statusProp == BatteryManager.BATTERY_STATUS_CHARGING ||
-                statusProp == BatteryManager.BATTERY_STATUS_FULL) {
-                return true
-            }
-        }
-
-        // 4. Fallback sticky intent
-        try {
-            val batteryStatus = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
-            val plugged = batteryStatus?.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0) ?: 0
-            val status = batteryStatus?.getIntExtra(BatteryManager.EXTRA_STATUS, -1) ?: -1
-
-            if (plugged > 0) return true
-            if (status == BatteryManager.BATTERY_STATUS_CHARGING || status == BatteryManager.BATTERY_STATUS_FULL) return true
-        } catch (e: Exception) {}
-
-        return false
-    }
-
     private fun startAutoDiscoveryAndStreaming() {
         serviceScope.launch {
             while (isActive && isRunning) {
-                if (!isChargerConnected()) {
-                    updateNotification("Paused — Connect charger to start streaming")
+                val localIp = getLocalIpAddress()
+                val hasWifi = localIp != null && localIp.contains(".")
+                val hasPower = isChargerPlugged
+
+                // STATE 1: No Wi-Fi
+                if (!hasWifi) {
+                    updateNotification("⚠️ Waiting for Wi-Fi connection...")
                     delay(1000)
                     continue
                 }
 
-                if (targetHubIp == null && !isDiscovering) {
-                    discoverHub()
+                // STATE 2: Wi-Fi on, but Charger unplugged
+                if (!hasPower) {
+                    updateNotification("🔌 Connect charger to start streaming")
+                    delay(800)
+                    continue
                 }
 
-                targetHubIp?.let { ip ->
-                    val payload = sampleBatteryTelemetry()
-                    val success = sendTelemetry(ip, payload)
-                    if (success) {
-                        updateNotification("Streaming to $ip (Charging)")
-                    } else {
-                        if (!isDiscovering) {
-                            serviceScope.launch { discoverHub() }
-                        }
+                // STATE 3: Wi-Fi on & Charger plugged in -> Discover Hub if we don't have an IP
+                if (targetHubIp == null) {
+                    updateNotification("Streaming...")
+                    discoverHub()
+                    continue
+                }
+
+                // STATE 4: Actively Stream to Hub
+                val ip = targetHubIp ?: continue
+                val payload = sampleBatteryTelemetry()
+                val watts = payload.optDouble("watts", 0.0)
+                val success = sendTelemetry(ip, payload)
+
+                if (success) {
+                    failCount = 0
+                    val wStr = String.format("%.1f", watts)
+                    updateNotification("⚡ Streaming to $ip ($wStr W)")
+                } else {
+                    failCount++
+                    // Only reset IP if it fails 25 times in a row (> 10 full seconds of complete failure!)
+                    if (failCount >= 25) {
+                        targetHubIp = null
+                        failCount = 0
+                        updateNotification("📡 No Central Hub available on Wi-Fi")
+                        delay(2000)
                     }
                 }
 
@@ -143,7 +161,16 @@ class ProbeService : Service() {
         isDiscovering = true
 
         withContext(Dispatchers.IO) {
-            // 1. Quick UDP listener
+            // 1. Quick check: Is the last known IP still alive?
+            val prefs = getSharedPreferences("voltmatch_probe_prefs", Context.MODE_PRIVATE)
+            val savedIp = prefs.getString("last_known_hub_ip", null)
+            if (savedIp != null && pingHub(savedIp)) {
+                targetHubIp = savedIp
+                isDiscovering = false
+                return@withContext
+            }
+
+            // 2. Fast UDP listener (1.2s timeout)
             try {
                 val socket = DatagramSocket(8082).apply { soTimeout = 1200 }
                 val buf = ByteArray(1024)
@@ -152,7 +179,9 @@ class ProbeService : Service() {
                 val msg = String(packet.data, 0, packet.length)
                 val json = JSONObject(msg)
                 if (json.optString("type") == "VOLTMATCH_HUB") {
-                    targetHubIp = json.optString("ip")
+                    val foundIp = json.optString("ip")
+                    targetHubIp = foundIp
+                    prefs.edit().putString("last_known_hub_ip", foundIp).apply()
                     socket.close()
                     isDiscovering = false
                     return@withContext
@@ -160,32 +189,23 @@ class ProbeService : Service() {
                 socket.close()
             } catch (e: Exception) {}
 
-            // 2. Parallel Subnet scan fallback
+            // 3. Parallel Subnet scan in safe chunks of 30
             val localIp = getLocalIpAddress()
             if (localIp != null && localIp.contains(".")) {
                 val subnet = localIp.substringBeforeLast(".")
-                coroutineScope {
-                    for (i in 1..254) {
-                        if (targetHubIp != null) break
-                        val testIp = "$subnet.$i"
-                        if (testIp == localIp) continue
+                for (chunkStart in 1..254 step 30) {
+                    if (targetHubIp != null) break
+                    coroutineScope {
+                        for (i in chunkStart until minOf(chunkStart + 30, 255)) {
+                            val testIp = "$subnet.$i"
+                            if (testIp == localIp) continue
 
-                        launch {
-                            try {
-                                val url = URL("http://$testIp:8080/api/discover")
-                                val conn = (url.openConnection() as HttpURLConnection).apply {
-                                    connectTimeout = 300
-                                    readTimeout = 300
+                            launch {
+                                if (pingHub(testIp)) {
+                                    targetHubIp = testIp
+                                    prefs.edit().putString("last_known_hub_ip", testIp).apply()
                                 }
-                                if (conn.responseCode == 200) {
-                                    val text = conn.inputStream.bufferedReader().readText()
-                                    val json = JSONObject(text)
-                                    if (json.optBoolean("hub")) {
-                                        targetHubIp = testIp
-                                    }
-                                }
-                                conn.disconnect()
-                            } catch (e: Exception) {}
+                            }
                         }
                     }
                 }
@@ -194,20 +214,28 @@ class ProbeService : Service() {
         }
     }
 
-    private fun sampleBatteryTelemetry(): JSONObject {
-        val batteryManager = getSystemService(Context.BATTERY_SERVICE) as BatteryManager
-        val batteryStatus = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+    private fun pingHub(ip: String): Boolean {
+        return try {
+            val url = URL("http://$ip:8080/api/discover")
+            val conn = (url.openConnection() as HttpURLConnection).apply {
+                connectTimeout = 300
+                readTimeout = 300
+            }
+            val ok = conn.responseCode == 200
+            conn.disconnect()
+            ok
+        } catch (e: Exception) {
+            false
+        }
+    }
 
+    private fun sampleBatteryTelemetry(): JSONObject {
+        val batteryStatus = latestBatteryIntent
         val rawCurrent = abs(batteryManager.getIntProperty(BatteryManager.BATTERY_PROPERTY_CURRENT_NOW))
         val currentInMA = if (rawCurrent > 10000) rawCurrent / 1000.0 else rawCurrent.toDouble()
 
         val voltageMv = batteryStatus?.getIntExtra(BatteryManager.EXTRA_VOLTAGE, -1) ?: 0
         val voltageInV = voltageMv / 1000.0
-
-        val status = batteryStatus?.getIntExtra(BatteryManager.EXTRA_STATUS, -1) ?: -1
-        val isCharging = status == BatteryManager.BATTERY_STATUS_CHARGING ||
-                         status == BatteryManager.BATTERY_STATUS_FULL ||
-                         isCablePluggedIn
 
         val level = batteryStatus?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
         val scale = batteryStatus?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: -1
@@ -223,7 +251,7 @@ class ProbeService : Service() {
             maxWatts = (maxVoltageUv / 1000000.0) * (maxCurrentUa / 1000000.0)
         }
 
-        val liveWatts = if (isCharging) voltageInV * (currentInMA / 1000.0) else 0.0
+        val liveWatts = if (isChargerPlugged) voltageInV * (currentInMA / 1000.0) else 0.0
 
         return JSONObject().apply {
             put("id", "probe_tile_${Build.MODEL.replace(" ", "_")}")
@@ -234,38 +262,51 @@ class ProbeService : Service() {
             put("batteryPct", batteryPct)
             put("tempC", tempC)
             put("maxChargingWatts", maxWatts)
-            put("isCharging", isCharging)
+            put("isCharging", isChargerPlugged)
         }
     }
 
+    private val batteryManager by lazy { getSystemService(Context.BATTERY_SERVICE) as BatteryManager }
+
+    // ROCK-SOLID HTTP SENDER (FixedLengthStreamingMode guarantees zero socket crashes)
     private fun sendTelemetry(hubIp: String, json: JSONObject): Boolean {
+        var conn: HttpURLConnection? = null
         return try {
             val url = URL("http://$hubIp:8080/api/push")
-            val conn = (url.openConnection() as HttpURLConnection).apply {
+            val jsonBytes = json.toString().toByteArray(Charsets.UTF_8)
+
+            conn = (url.openConnection() as HttpURLConnection).apply {
                 requestMethod = "POST"
                 doOutput = true
-                connectTimeout = 1000
-                readTimeout = 1000
+                doInput = true
+                useCaches = false
+                connectTimeout = 2000
+                readTimeout = 2000
                 setRequestProperty("Content-Type", "application/json; charset=utf-8")
-                setRequestProperty("Connection", "Keep-Alive")
+                setRequestProperty("Accept", "application/json")
+                // Tell Android the exact byte length to prevent chunked EOFException!
+                setFixedLengthStreamingMode(jsonBytes.size)
             }
 
-            val bytes = json.toString().toByteArray(Charsets.UTF_8)
             conn.outputStream.use { os ->
-                os.write(bytes)
+                os.write(jsonBytes)
                 os.flush()
             }
 
             val code = conn.responseCode
-            if (code == 200) {
-                conn.inputStream.close()
+            if (code in 200..299) {
+                conn.inputStream?.bufferedReader()?.use { it.readText() }
                 true
             } else {
-                conn.errorStream?.close()
+                conn.errorStream?.bufferedReader()?.use { it.readText() }
                 false
             }
         } catch (e: Exception) {
             false
+        } finally {
+            try {
+                conn?.disconnect()
+            } catch (e: Exception) {}
         }
     }
 
@@ -296,7 +337,7 @@ class ProbeService : Service() {
 
     private fun buildNotification(statusText: String): Notification {
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("⚡ VoltMatch Probe Active")
+            .setContentTitle("⚡ VoltMatch Probe")
             .setContentText(statusText)
             .setSmallIcon(R.drawable.ic_qs_voltmatch)
             .setOngoing(true)
@@ -304,6 +345,8 @@ class ProbeService : Service() {
     }
 
     private fun updateNotification(statusText: String) {
+        if (statusText == lastNotificationText) return
+        lastNotificationText = statusText
         val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         manager.notify(NOTIFICATION_ID, buildNotification(statusText))
     }
@@ -311,16 +354,14 @@ class ProbeService : Service() {
     override fun onDestroy() {
         isRunning = false
         serviceScope.cancel()
+
         try {
-            unregisterReceiver(powerReceiver)
+            applicationContext.unregisterReceiver(batteryReceiver)
         } catch (e: Exception) {}
 
-        if (wakeLock?.isHeld == true) {
-            wakeLock?.release()
-        }
-        if (wifiLock?.isHeld == true) {
-            wifiLock?.release()
-        }
+        if (wakeLock?.isHeld == true) wakeLock?.release()
+        if (wifiLock?.isHeld == true) wifiLock?.release()
+
         VoltMatchTileService.refreshTile(this)
         super.onDestroy()
     }
