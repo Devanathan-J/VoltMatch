@@ -104,7 +104,7 @@ class MainActivity: FlutterActivity() {
                     result.success(response)
                 }
 
-                // 3. BACKGROUND WAKELOCK (Allows screen-off measurement without Android sleeping)
+                // 3. BACKGROUND WAKELOCK
                 "acquireWakeLock" -> {
                     val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
                     wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "VoltMatch::MonitorWakelock")
@@ -117,6 +117,17 @@ class MainActivity: FlutterActivity() {
                     if (wakeLock?.isHeld == true) {
                         wakeLock?.release()
                     }
+                    result.success(true)
+                }
+
+                // 5. QUICK TILE STATE QUERIES
+                "isProbeServiceRunning" -> {
+                    result.success(ProbeService.isRunning)
+                }
+
+                "stopProbeService" -> {
+                    stopService(Intent(this, ProbeService::class.java))
+                    VoltMatchTileService.refreshTile(this)
                     result.success(true)
                 }
 

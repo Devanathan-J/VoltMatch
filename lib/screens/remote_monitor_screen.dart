@@ -60,11 +60,23 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
   @override
   void initState() {
     super.initState();
-    // Windows = Central Hub by default; Android = Join as Probe by default!
     isHostMode = Platform.isWindows;
 
+    // Check if the Quick Settings Tile is already running in the background!
+    if (Platform.isAndroid) {
+      platform.invokeMethod<bool>('isProbeServiceRunning').then((running) {
+        if (running == true && mounted) {
+          setState(() {
+            isHostMode = false;
+            isRunning = true;
+            broadcastUrl = 'Streaming via Quick Tile';
+          });
+        }
+      });
+    }
+
     _resolveLocalIp().then((_) {
-      if (!isHostMode) {
+      if (!isHostMode && !isRunning) {
         _startAutoDiscovery();
       }
     });
@@ -586,7 +598,10 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
     _alertWatchdogTimer?.cancel();
     _probeClient?.close(force: true);
     await _server?.close(force: true);
+
+    // Stop background service if active
     if (Platform.isAndroid) {
+      await platform.invokeMethod('stopProbeService');
       await platform.invokeMethod('releaseWakeLock');
     }
 
