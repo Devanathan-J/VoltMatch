@@ -1,11 +1,175 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'selection_screen.dart';
 import 'history_screen.dart';
 import 'live_tester_screen.dart';
 import 'remote_monitor_screen.dart';
 
-class HomeScreen extends StatelessWidget {
+class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
+
+  @override
+  State<HomeScreen> createState() => _HomeScreenState();
+}
+
+class _HomeScreenState extends State<HomeScreen> {
+  static const platform = MethodChannel('com.voltmatch/hardware');
+
+  @override
+  void initState() {
+    super.initState();
+    // Check if this is the first launch on Android
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (Platform.isAndroid) {
+        _checkFirstTimePermissions();
+      }
+    });
+  }
+
+  Future<void> _checkFirstTimePermissions() async {
+    final prefs = await SharedPreferences.getInstance();
+    final bool hasShownDialog = prefs.getBool('has_shown_battery_setup') ?? false;
+
+    if (!hasShownDialog && mounted) {
+      _showFirstTimeSetupDialog();
+    }
+  }
+
+  void _showFirstTimeSetupDialog() {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => StatefulBuilder(
+        builder: (context, setModalState) {
+          return AlertDialog(
+            backgroundColor: const Color(0xFF161D23),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(20),
+              side: const BorderSide(color: Color(0xFF22BFA2), width: 1.5),
+            ),
+            title: const Row(
+              children: [
+                Icon(Icons.bolt, color: Color(0xFF22BFA2)),
+                SizedBox(width: 8),
+                Text(
+                  'Background Setup',
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
+                ),
+              ],
+            ),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'To let VoltMatch stream charging wattage with your screen turned off and chime at 80%, please enable these two quick settings:',
+                  style: TextStyle(color: Color(0xFFA7B0B9), fontSize: 13, height: 1.4),
+                ),
+                const SizedBox(height: 16),
+
+                // Button 1: Notification Permission
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: Container(
+                    padding: const EdgeInsets.all(8),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF22BFA2).withOpacity(0.15),
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: const Icon(Icons.notifications_active, color: Color(0xFF22BFA2), size: 20),
+                  ),
+                  title: const Text('1. Notifications', style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold)),
+                  subtitle: const Text('For Quick Settings tile & 80% chime', style: TextStyle(fontSize: 11, color: Color(0xFFA7B0B9))),
+                  trailing: ElevatedButton(
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFF22BFA2),
+                      foregroundColor: Colors.black,
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                    ),
+                    onPressed: () {
+                      platform.invokeMethod('requestNotificationPermission');
+                    },
+                    child: const Text('Enable', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
+                  ),
+                ),
+
+                const Divider(color: Colors.white10),
+
+                // Button 2: Unrestricted Battery Setting
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: Container(
+                    padding: const EdgeInsets.all(8),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF3DDDB5).withOpacity(0.15),
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: const Icon(Icons.battery_charging_full, color: Color(0xFF3DDDB5), size: 20),
+                  ),
+                  title: const Text('2. Unrestricted Battery', style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold)),
+                  subtitle: const Text('Stops Android from putting Wi-Fi to sleep', style: TextStyle(fontSize: 11, color: Color(0xFFA7B0B9))),
+                  trailing: ElevatedButton(
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFF3DDDB5),
+                      foregroundColor: Colors.black,
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                    ),
+                    onPressed: () {
+                      platform.invokeMethod('requestIgnoreBatteryOptimization');
+                    },
+                    child: const Text('Set', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
+                  ),
+                ),
+
+                const Divider(color: Colors.white10),
+
+                // Button 3: App Info Settings ("Pause if unused")
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: Container(
+                    padding: const EdgeInsets.all(8),
+                    decoration: BoxDecoration(
+                      color: Colors.white10,
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: const Icon(Icons.settings, color: Colors.white70, size: 20),
+                  ),
+                  title: const Text('3. App Settings', style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold)),
+                  subtitle: const Text('Disable "Pause app activity if unused"', style: TextStyle(fontSize: 11, color: Color(0xFFA7B0B9))),
+                  trailing: OutlinedButton(
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: Colors.white,
+                      side: const BorderSide(color: Colors.white24),
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                    ),
+                    onPressed: () {
+                      platform.invokeMethod('openAppInfoSettings');
+                    },
+                    child: const Text('Open', style: TextStyle(fontSize: 12)),
+                  ),
+                ),
+              ],
+            ),
+            actions: [
+              TextButton(
+                onPressed: () async {
+                  final prefs = await SharedPreferences.getInstance();
+                  await prefs.setBool('has_shown_battery_setup', true);
+                  if (mounted) Navigator.pop(ctx);
+                },
+                child: const Text(
+                  'Done / Continue',
+                  style: TextStyle(color: Color(0xFF22BFA2), fontWeight: FontWeight.bold, fontSize: 15),
+                ),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -66,7 +230,7 @@ class HomeScreen extends StatelessWidget {
               ),
               const SizedBox(height: 28),
 
-              // 1. Smart Compatibility Calculator
+              // 1. Compatibility Calculator
               InkWell(
                 onTap: () {
                   Navigator.push(
@@ -135,7 +299,7 @@ class HomeScreen extends StatelessWidget {
 
               const SizedBox(height: 16),
 
-              // 2. Live Real-Time Meter & Cable Tester
+              // 2. Live Meter & Cable Tester
               InkWell(
                 onTap: () {
                   Navigator.push(
@@ -204,7 +368,7 @@ class HomeScreen extends StatelessWidget {
 
               const SizedBox(height: 16),
 
-              // 3. Remote Screen-Off Monitor (For testing true 44W speed)
+              // 3. Remote Monitor
               InkWell(
                 onTap: () {
                   Navigator.push(
@@ -252,7 +416,7 @@ class HomeScreen extends StatelessWidget {
                             ),
                             SizedBox(height: 4),
                             Text(
-                              'Test with screen completely Off',
+                              'Stream charging wattage to PC with screen off',
                               style: TextStyle(
                                 color: Color(0xFFA7B0B9),
                                 fontSize: 13,
@@ -273,7 +437,7 @@ class HomeScreen extends StatelessWidget {
 
               const SizedBox(height: 28),
 
-              // Educational Tip Box
+              // Educational Tip
               Container(
                 padding: const EdgeInsets.all(20),
                 decoration: BoxDecoration(
