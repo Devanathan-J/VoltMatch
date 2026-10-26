@@ -94,6 +94,8 @@ When opening VoltMatch for the first time, complete the quick setup dialog to en
 4. **View your PC monitor:**
    - Your phone will auto-connect via Zero-Config UDP discovery and stream live wattage curves side-by-side!
 
+> **Troubleshooting (PC on Wi-Fi):** If the phone starts streaming but the PC never receives data, Windows Firewall is usually blocking inbound connections on the Wi-Fi (Public) profile. Run `voltmatch.exe` as Administrator once so it can add the firewall rules, or manually allow **VoltMatch** through Windows Firewall for TCP port `8080` and UDP port `8082`. Also make sure the PC and phone are on the same subnet.
+
 ---
 
 ## 📥 Downloads *(Coming Soon)*

@@ -179,12 +179,17 @@ class ProbeService : Service() {
                 val msg = String(packet.data, 0, packet.length)
                 val json = JSONObject(msg)
                 if (json.optString("type") == "VOLTMATCH_HUB") {
-                    val foundIp = json.optString("ip")
-                    targetHubIp = foundIp
-                    prefs.edit().putString("last_known_hub_ip", foundIp).apply()
-                    socket.close()
-                    isDiscovering = false
-                    return@withContext
+                    // Prefer the packet's source address: it is always the real,
+                    // reachable address of the host (the advertised IP may be
+                    // wrong when the host has virtual adapters).
+                    val foundIp = packet.address?.hostAddress ?: json.optString("ip")
+                    if (foundIp.isNotEmpty()) {
+                        targetHubIp = foundIp
+                        prefs.edit().putString("last_known_hub_ip", foundIp).apply()
+                        socket.close()
+                        isDiscovering = false
+                        return@withContext
+                    }
                 }
                 socket.close()
             } catch (e: Exception) {}

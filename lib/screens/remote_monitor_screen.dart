@@ -92,18 +92,87 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
   }
 
   Future<void> _resolveLocalIp() async {
+    // Prefer real physical adapters (Wi-Fi / Ethernet) and ignore virtual
+    // adapters (Hyper-V, WSL, VMware, VirtualBox, VPNs, ...) whose IPs are
+    // not reachable from other devices on the LAN. This is what previously
+    // caused the host to advertise an unreachable IP when the PC was on Wi-Fi.
     try {
-      for (var interface in await NetworkInterface.list()) {
-        for (var addr in interface.addresses) {
+      final candidates = <MapEntry<String, int>>[];
+      for (final iface in await NetworkInterface.list()) {
+        final name = iface.name.toLowerCase();
+        if (_isVirtualInterface(name)) continue;
+        for (final addr in iface.addresses) {
+          if (addr.type != InternetAddressType.IPv4) continue;
+          if (addr.isLoopback) continue;
+          final ip = addr.address;
+          if (ip == '0.0.0.0' || ip.startsWith('169.254.')) continue;
+
+          int score = 0;
+          if (name.contains('wi-fi') || name.contains('wifi') || name.contains('wlan') || name.contains('wireless')) {
+            score += 100;
+          } else if (name.contains('ethernet') || name.contains('eth')) {
+            score += 90;
+          } else {
+            score += 10;
+          }
+          candidates.add(MapEntry(ip, score));
+        }
+      }
+
+      if (candidates.isNotEmpty) {
+        candidates.sort((a, b) => b.value.compareTo(a.value));
+        if (mounted) {
+          setState(() {
+            cachedLocalIp = candidates.first.key;
+          });
+        } else {
+          cachedLocalIp = candidates.first.key;
+        }
+        return;
+      }
+    } catch (_) {}
+
+    // Fallback: original behaviour
+    try {
+      for (var iface in await NetworkInterface.list()) {
+        for (var addr in iface.addresses) {
           if (addr.type == InternetAddressType.IPv4 && !addr.isLoopback) {
-            setState(() {
+            if (mounted) {
+              setState(() {
+                cachedLocalIp = addr.address;
+              });
+            } else {
               cachedLocalIp = addr.address;
-            });
+            }
             return;
           }
         }
       }
     } catch (_) {}
+  }
+
+  bool _isVirtualInterface(String name) {
+    const virtualKeywords = [
+      'virtual',
+      'vethernet',
+      'vmware',
+      'virtualbox',
+      'hyper-v',
+      'hyperv',
+      'wsl',
+      'docker',
+      'tap',
+      'tun',
+      'vpn',
+      'pseudo',
+      'loopback',
+      'npcap',
+      'bluetooth',
+    ];
+    for (final k in virtualKeywords) {
+      if (name.contains(k)) return true;
+    }
+    return false;
   }
 
   // ─────────────────────────────────────────────────────────────
@@ -252,6 +321,20 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
   // AUTO-DISCOVERY ENGINE
   // ─────────────────────────────────────────────────────────────
 
+  Future<void> _ensureWindowsFirewall() async {
+    // Best-effort: try to allow inbound traffic on the ports we use. This is a
+    // no-op (and silently fails) when not running as administrator; in that
+    // case the user must allow the app through Windows Firewall manually.
+    try {
+      for (final args in [
+        ['advfirewall', 'firewall', 'add', 'rule', 'name=VoltMatch Hub TCP 8080', 'dir=in', 'action=allow', 'protocol=TCP', 'localport=8080', 'profile=any', 'enable=yes'],
+        ['advfirewall', 'firewall', 'add', 'rule', 'name=VoltMatch Discovery UDP 8082', 'dir=in', 'action=allow', 'protocol=UDP', 'localport=8082', 'profile=any', 'enable=yes'],
+      ]) {
+        await Process.run('netsh', args);
+      }
+    } catch (_) {}
+  }
+
   Future<void> _startUdpBeacon() async {
     try {
       _udpBeaconSocket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
@@ -268,7 +351,17 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
           'ip': cachedLocalIp,
           'name': effectiveName,
         }));
+        // Limited broadcast (works on most LANs)
         _udpBeaconSocket?.send(msg, InternetAddress('255.255.255.255'), 8082);
+        // Subnet-directed broadcast (more reliable on Wi-Fi, where limited
+        // broadcast packets are sometimes dropped by the AP)
+        try {
+          final parts = cachedLocalIp.split('.');
+          if (parts.length == 4) {
+            final bcast = '${parts[0]}.${parts[1]}.${parts[2]}.255';
+            _udpBeaconSocket?.send(msg, InternetAddress(bcast), 8082);
+          }
+        } catch (_) {}
       });
     } catch (_) {}
   }
@@ -295,8 +388,12 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
             try {
               final str = utf8.decode(datagram.data);
               final data = json.decode(str) as Map<String, dynamic>;
-              if (data['type'] == 'VOLTMATCH_HUB' && data['ip'] != null) {
-                _onHubFound(data['ip'], data['name'] ?? 'VoltMatch Hub');
+              if (data['type'] == 'VOLTMATCH_HUB') {
+                final sourceIp = datagram.address.address;
+                final hubIp = sourceIp.isNotEmpty ? sourceIp : (data['ip']?.toString() ?? '');
+                if (hubIp.isNotEmpty) {
+                  _onHubFound(hubIp, data['name'] ?? 'VoltMatch Hub');
+                }
               }
             } catch (_) {}
           }
@@ -446,6 +543,10 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
     });
 
     _startUdpBeacon();
+
+    if (Platform.isWindows) {
+      _ensureWindowsFirewall();
+    }
 
     _fastTimer = Timer.periodic(const Duration(milliseconds: 400), (_) {
       _fetchSelfStats();
