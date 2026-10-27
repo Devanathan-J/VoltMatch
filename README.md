@@ -99,7 +99,7 @@ When opening VoltMatch for the first time, complete the quick setup dialog to en
 
 ---
 
-## � Direct Downloads
+## Direct Downloads
 
 | Platform | Status | Download Link |
 | :--- | :--- | :--- |
@@ -109,6 +109,6 @@ When opening VoltMatch for the first time, complete the quick setup dialog to en
 
 ---
 
-## �📄 License
+## 📄 License
 
 This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
