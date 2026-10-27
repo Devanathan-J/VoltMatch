@@ -66,6 +66,7 @@ We’ve all been there: you plug in your phone in another room, get deep into wo
 ### 3. 🖥️ Native Windows Mission Control (`.exe`) & Android Quick Access
 - **In-App Desktop Dashboard**: Transforms the Windows `.exe` window into a widescreen Mission Control grid with 60 FPS sparkline charts.
 - **Windows 10/11 Toast Notifications & Chime**: Pops up native notification banners and plays synchronous audio alerts when devices reach 80%+.
+- **Administrator / Firewall Access (required to discover devices)**: `voltmatch.exe` runs with Administrator privileges (UAC prompt) so it can add the inbound Windows Firewall rules needed to discover and receive telemetry from phones. Without admin access, phones may not show up.
 - **📥 CSV Session Exporter**: Export full multi-device charging sessions with timestamps, Watts, and thermals to your `Downloads` folder with one click.
 - **⚡ Android Quick Settings Tile**: Add VoltMatch to your phone's swipe-down notification shade for 1-tap background streaming without opening the app.
 
@@ -94,20 +95,20 @@ When opening VoltMatch for the first time, complete the quick setup dialog to en
 4. **View your PC monitor:**
    - Your phone will auto-connect via Zero-Config UDP discovery and stream live wattage curves side-by-side!
 
-> **Troubleshooting (PC on Wi-Fi):** If the phone starts streaming but the PC never receives data, Windows Firewall is usually blocking inbound connections on the Wi-Fi (Public) profile. Run `voltmatch.exe` as Administrator once so it can add the firewall rules, or manually allow **VoltMatch** through Windows Firewall for TCP port `8080` and UDP port `8082`. Also make sure the PC and phone are on the same subnet.
+> **Windows Firewall / Admin access (required to see other devices):** `voltmatch.exe` requests Administrator privileges on launch (UAC prompt) so it can add the inbound Windows Firewall rules it needs. **If you do not run it as Administrator (or decline the UAC prompt), inbound connections on the Wi-Fi (Public) profile are usually blocked and your phones will not be discovered — devices will not show up.** In that case, run `voltmatch.exe` as Administrator once so it can add the firewall rules, or manually allow **VoltMatch** through Windows Firewall for TCP port `8080` and UDP port `8082`. Also make sure the PC and phone are on the same subnet.
 
 ---
 
-## 📥 Downloads *(Coming Soon)*
+## � Downloads
 
 | Platform | Status | Download Link |
 | :--- | :--- | :--- |
-| **Android (APK)** | 🟡 Coming Soon | *Link will be added here* |
-| **Windows (.exe)** | 🟡 Coming Soon | *Link will be added here* |
+| **Android (APK)** | Active | *[Download APK](https://github.com/Devanathan-J/VoltMatch/releases/download/v1.0.0/app-release.apk)* |
+| **Windows (.exe)** | Active | *[Download EXE](https://github.com/Devanathan-J/VoltMatch/releases/download/v1.0.0/VoltMatch-Windows-v1.0.0.zip)* |
 | **iOS (IPA)** | 🟡 Coming Soon | *Link will be added here* |
 
 ---
 
-## 📄 License
+## �📄 License
 
 This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
