@@ -1486,7 +1486,7 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
                 const SizedBox(height: 24),
                 const Center(
                   child: Text(
-                    '💡 Pro-Tip: Lock your screen after connecting to unlock full 44W+ charging.',
+                    '💡 Tip: Lock your screen after connecting to continue receiving exact data.',
                     textAlign: TextAlign.center,
                     style: TextStyle(fontSize: 12, color: Color(0xFFA7B0B9)),
                   ),

@@ -20,11 +20,11 @@
 ---
 
 <p align="center">
-  <a href="#-downloads">
-    <img src="https://img.shields.io/badge/Download_Android-Coming_Soon-22BFA2?style=for-the-badge&logo=android" alt="Download Android" />
+  <a href="https://github.com/Devanathan-J/VoltMatch/releases/download/v1.0.0/VoltMatch_v1.0.0_release.apk">
+    <img src="https://img.shields.io/badge/Download_Android-v1.0.0.apk-22BFA2?style=for-the-badge&logo=android" alt="Download Android" />
   </a>
-  <a href="#-downloads">
-    <img src="https://img.shields.io/badge/Download_Windows-Coming_Soon-0078D6?style=for-the-badge&logo=windows" alt="Download Windows" />
+  <a href="https://github.com/Devanathan-J/VoltMatch/releases/download/v1.0.0/VoltMatch_Windows_v1.0.0.zip">
+    <img src="https://img.shields.io/badge/Download_Windows-v1.0.0.exe-0078D6?style=for-the-badge&logo=windows" alt="Download Windows" />
   </a>
   <a href="#-downloads">
     <img src="https://img.shields.io/badge/Download_iOS-Coming_Soon-A7B0B9?style=for-the-badge&logo=apple" alt="Download iOS" />
@@ -99,12 +99,12 @@ When opening VoltMatch for the first time, complete the quick setup dialog to en
 
 ---
 
-## � Downloads
+## � Direct Downloads
 
 | Platform | Status | Download Link |
 | :--- | :--- | :--- |
-| **Android (APK)** | Active | *[Download APK](https://github.com/Devanathan-J/VoltMatch/releases/download/v1.0.0/app-release.apk)* |
-| **Windows (.exe)** | Active | *[Download EXE](https://github.com/Devanathan-J/VoltMatch/releases/download/v1.0.0/VoltMatch-Windows-v1.0.0.zip)* |
+| **Android (APK)** | Active | *[Download APK](https://github.com/Devanathan-J/VoltMatch/releases/download/v1.0.0/VoltMatch_v1.0.0_release.apk)* |
+| **Windows (.exe)** | Active | *[Download EXE](https://github.com/Devanathan-J/VoltMatch/releases/download/v1.0.0/VoltMatch_Windows_v1.0.0.zip)* |
 | **iOS (IPA)** | 🟡 Coming Soon | *Link will be added here* |
 
 ---
