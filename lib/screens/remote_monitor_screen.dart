@@ -14,7 +14,6 @@ class RemoteMonitorScreen extends StatefulWidget {
 class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
   static const platform = MethodChannel('com.voltmatch/hardware');
 
-  // SMART DEFAULTS: Windows defaults to Central Hub; Android defaults to Join as Probe!
   late bool isHostMode;
 
   bool enable80AlertSound = true;
@@ -26,15 +25,16 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
   final TextEditingController hubIpController = TextEditingController();
   final TextEditingController nicknameController = TextEditingController();
 
-  // Auto-Discovery
+  // Auto-Discovery & Continuous Radar
   bool isSearchingForHub = false;
   String? discoveredHubName;
   String? discoveredHubIp;
-  final List<Map<String, String>> discoveredHubs = [];
+  final List<Map<String, dynamic>> discoveredHubs = [];
   String? selectedHubIp;
   RawDatagramSocket? _udpBeaconSocket;
   RawDatagramSocket? _udpListenSocket;
   Timer? _beaconTimer;
+  Timer? _realtimeRadarTimer;
 
   HttpServer? _server;
   Timer? _fastTimer;
@@ -44,12 +44,14 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
   final Map<String, Map<String, dynamic>> _connectedDevices = {};
   final Map<String, List<double>> _deviceHistories = {};
 
+  // Per-Device Mute Tracking (device_id -> isMuted)
+  final Map<String, bool> _mutedDevices = {};
+
   final Set<String> _notified80Devices = {};
   DateTime _lastSoundTime = DateTime.fromMillisecondsSinceEpoch(0);
 
   final List<String> _csvLog = ['Timestamp,Device,Watts,Current_mA,Voltage_V,Battery_Pct,Temp_C,Is_Charging'];
 
-  // Self telemetry
   String deviceName = Platform.isWindows ? 'Windows Desktop Host' : 'Android Device';
   double currentMA = 0.0;
   double voltageV = 0.0;
@@ -64,7 +66,6 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
     super.initState();
     isHostMode = Platform.isWindows;
 
-    // Check if the Quick Settings Tile is already running in the background!
     if (Platform.isAndroid) {
       platform.invokeMethod<bool>('isProbeServiceRunning').then((running) {
         if (running == true && mounted) {
@@ -79,7 +80,7 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
 
     _resolveLocalIp().then((_) {
       if (!isHostMode && !isRunning) {
-        _startAutoDiscovery();
+        _startRealtimeAutoDiscovery();
       }
     });
   }
@@ -88,16 +89,13 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
   void dispose() {
     _stopSession();
     _stopDiscovery();
+    _realtimeRadarTimer?.cancel();
     hubIpController.dispose();
     nicknameController.dispose();
     super.dispose();
   }
 
   Future<void> _resolveLocalIp() async {
-    // Prefer real physical adapters (Wi-Fi / Ethernet) and ignore virtual
-    // adapters (Hyper-V, WSL, VMware, VirtualBox, VPNs, ...) whose IPs are
-    // not reachable from other devices on the LAN. This is what previously
-    // caused the host to advertise an unreachable IP when the PC was on Wi-Fi.
     try {
       final candidates = <MapEntry<String, int>>[];
       for (final iface in await NetworkInterface.list()) {
@@ -134,7 +132,6 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
       }
     } catch (_) {}
 
-    // Fallback: original behaviour
     try {
       for (var iface in await NetworkInterface.list()) {
         for (var addr in iface.addresses) {
@@ -155,21 +152,8 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
 
   bool _isVirtualInterface(String name) {
     const virtualKeywords = [
-      'virtual',
-      'vethernet',
-      'vmware',
-      'virtualbox',
-      'hyper-v',
-      'hyperv',
-      'wsl',
-      'docker',
-      'tap',
-      'tun',
-      'vpn',
-      'pseudo',
-      'loopback',
-      'npcap',
-      'bluetooth',
+      'virtual', 'vethernet', 'vmware', 'virtualbox', 'hyper-v', 'hyperv',
+      'wsl', 'docker', 'tap', 'tun', 'vpn', 'pseudo', 'loopback', 'npcap', 'bluetooth',
     ];
     for (final k in virtualKeywords) {
       if (name.contains(k)) return true;
@@ -178,12 +162,158 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
   }
 
   // ─────────────────────────────────────────────────────────────
-  // WINDOWS NATIVE SOUND & TOAST NOTIFICATION ENGINE
+  // REAL-TIME AUTO-DISCOVERY & ZOMBIE CLEANUP ENGINE
   // ─────────────────────────────────────────────────────────────
 
-  void _playWindowsChime() {
+  void _startRealtimeAutoDiscovery() {
+    if (isRunning) return;
+    setState(() {
+      isSearchingForHub = true;
+    });
+
+    _startUdpListener();
+    _scanSubnetOnce();
+
+    _realtimeRadarTimer?.cancel();
+    _realtimeRadarTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!isRunning && !isHostMode && mounted) {
+        _verifyAndPruneHubs();
+        _scanSubnetOnce();
+      }
+    });
+  }
+
+  Future<void> _startUdpListener() async {
+    try {
+      _udpListenSocket?.close();
+      _udpListenSocket = await RawDatagramSocket.bind(
+        InternetAddress.anyIPv4,
+        8082,
+        reuseAddress: true,
+        reusePort: true,
+      );
+      _udpListenSocket?.listen((RawSocketEvent event) {
+        if (event == RawSocketEvent.read) {
+          final datagram = _udpListenSocket?.receive();
+          if (datagram != null) {
+            try {
+              final str = utf8.decode(datagram.data);
+              final data = json.decode(str) as Map<String, dynamic>;
+              if (data['type'] == 'VOLTMATCH_HUB') {
+                final sourceIp = datagram.address.address;
+                final hubIp = sourceIp.isNotEmpty ? sourceIp : (data['ip']?.toString() ?? '');
+                if (hubIp.isNotEmpty) {
+                  _onHubPingReceived(hubIp, data['name'] ?? 'VoltMatch Hub');
+                }
+              }
+            } catch (_) {}
+          }
+        }
+      });
+    } catch (_) {}
+  }
+
+  Future<void> _scanSubnetOnce() async {
+    if (cachedLocalIp == '127.0.0.1' || !mounted || isRunning) return;
+    final parts = cachedLocalIp.split('.');
+    if (parts.length != 4) return;
+    final subnet = '${parts[0]}.${parts[1]}.${parts[2]}';
+
+    final client = HttpClient()..connectionTimeout = const Duration(milliseconds: 350);
+
+    for (int i = 1; i <= 254; i += 50) {
+      if (!mounted || isRunning) break;
+      final futures = <Future>[];
+      for (int j = i; j < i + 50 && j <= 254; j++) {
+        final target = '$subnet.$j';
+        if (target == cachedLocalIp) continue;
+
+        futures.add(() async {
+          try {
+            final req = await client.getUrl(Uri.parse('http://$target:8080/api/discover'));
+            final res = await req.close();
+            if (res.statusCode == HttpStatus.ok) {
+              final body = await utf8.decoder.bind(res).join();
+              final data = json.decode(body) as Map<String, dynamic>;
+              if (data['hub'] == true) {
+                _onHubPingReceived(target, data['name'] ?? 'VoltMatch Hub');
+              }
+            }
+          } catch (_) {}
+        }());
+      }
+      await Future.wait(futures);
+    }
+    client.close(force: true);
+
+    if (mounted && !isRunning) {
+      setState(() {
+        isSearchingForHub = false;
+      });
+    }
+  }
+
+  void _onHubPingReceived(String ip, String name) {
+    if (!mounted || isRunning) return;
+    final index = discoveredHubs.indexWhere((h) => h['ip'] == ip);
+
+    setState(() {
+      if (index >= 0) {
+        discoveredHubs[index]['lastSeen'] = DateTime.now().millisecondsSinceEpoch;
+        discoveredHubs[index]['name'] = name;
+      } else {
+        discoveredHubs.add({'ip': ip, 'name': name, 'lastSeen': DateTime.now().millisecondsSinceEpoch});
+      }
+
+      if (selectedHubIp == null || !discoveredHubs.any((h) => h['ip'] == selectedHubIp)) {
+        selectedHubIp = ip;
+        discoveredHubIp = ip;
+        discoveredHubName = name;
+        hubIpController.text = ip;
+      }
+      isSearchingForHub = false;
+    });
+  }
+
+  Future<void> _verifyAndPruneHubs() async {
+    if (discoveredHubs.isEmpty || isRunning || !mounted) return;
+    final now = DateTime.now().millisecondsSinceEpoch;
+
+    setState(() {
+      discoveredHubs.removeWhere((h) => (now - (h['lastSeen'] as int)) > 2000);
+
+      if (discoveredHubs.isEmpty) {
+        discoveredHubIp = null;
+        discoveredHubName = null;
+        selectedHubIp = null;
+        hubIpController.clear();
+        isSearchingForHub = true;
+      } else if (selectedHubIp == null || !discoveredHubs.any((h) => h['ip'] == selectedHubIp)) {
+        selectedHubIp = discoveredHubs.first['ip'];
+        discoveredHubIp = discoveredHubs.first['ip'];
+        discoveredHubName = discoveredHubs.first['name'];
+        hubIpController.text = discoveredHubIp!;
+      }
+    });
+  }
+
+  void _stopDiscovery() {
+    _beaconTimer?.cancel();
+    _realtimeRadarTimer?.cancel();
+    _udpBeaconSocket?.close();
+    _udpListenSocket?.close();
+    _udpBeaconSocket = null;
+    _udpListenSocket = null;
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // SOUND & NOTIFICATION ENGINE (DESKTOP + ANDROID CENTRAL HUB)
+  // ─────────────────────────────────────────────────────────────
+
+  void _playAlertChime() {
     if (Platform.isWindows) {
-      Process.run('powershell', [
+      // Non-blocking asynchronous audio trigger on Windows
+      Process.start('powershell', [
         '-NoProfile',
         '-WindowStyle', 'Hidden',
         '-Command',
@@ -210,8 +340,10 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
         }
         '''
       ]);
-    } else {
-      SystemSound.play(SystemSoundType.alert);
+    } else if (Platform.isAndroid) {
+      // Native Android notification stream playback (audible on all phone brands!)
+      platform.invokeMethod('playSystemChime');
+      HapticFeedback.heavyImpact();
     }
   }
 
@@ -247,11 +379,11 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
   }
 
   void _testAlertSound() {
-    _playWindowsChime();
+    _playAlertChime();
     _showWindowsNotification('Test Device', 80);
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(
-        content: Text('🔔 Testing Windows Chime & Notification...'),
+        content: Text('🔔 Testing Chime & Notification...'),
         backgroundColor: Color(0xFF22BFA2),
         duration: Duration(seconds: 2),
       ),
@@ -264,8 +396,13 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
     bool anyDeviceNeedsSound = false;
     final now = DateTime.now();
 
-    for (var d in _connectedDevices.values) {
-      final id = d['id']?.toString() ?? '';
+    for (var entry in _connectedDevices.entries) {
+      final id = entry.key;
+      final d = entry.value;
+
+      // Skip if this specific device has its chime turned OFF by the user!
+      if (_mutedDevices[id] == true) continue;
+
       final name = d['name']?.toString() ?? 'Device';
       final bat = (d['batteryPct'] as num?)?.toInt() ?? 0;
       final watts = (d['watts'] as num?)?.toDouble() ?? 0.0;
@@ -285,9 +422,11 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
     }
 
     if (anyDeviceNeedsSound) {
-      if (now.difference(_lastSoundTime).inSeconds >= 10) {
+      // If never played before (_lastSoundTime is epoch 0), play IMMEDIATELY on first tick!
+      final hasNeverPlayed = _lastSoundTime.millisecondsSinceEpoch == 0;
+      if (hasNeverPlayed || now.difference(_lastSoundTime).inSeconds >= 10) {
         _lastSoundTime = now;
-        _playWindowsChime();
+        _playAlertChime();
       }
     } else {
       _lastSoundTime = DateTime.fromMillisecondsSinceEpoch(0);
@@ -317,160 +456,6 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
         );
       }
     }
-  }
-
-  // ─────────────────────────────────────────────────────────────
-  // AUTO-DISCOVERY ENGINE
-  // ─────────────────────────────────────────────────────────────
-
-  Future<void> _ensureWindowsFirewall() async {
-    // Best-effort: try to allow inbound traffic on the ports we use. This is a
-    // no-op (and silently fails) when not running as administrator; in that
-    // case the user must allow the app through Windows Firewall manually.
-    try {
-      for (final args in [
-        ['advfirewall', 'firewall', 'add', 'rule', 'name=VoltMatch Hub TCP 8080', 'dir=in', 'action=allow', 'protocol=TCP', 'localport=8080', 'profile=any', 'enable=yes'],
-        ['advfirewall', 'firewall', 'add', 'rule', 'name=VoltMatch Discovery UDP 8082', 'dir=in', 'action=allow', 'protocol=UDP', 'localport=8082', 'profile=any', 'enable=yes'],
-      ]) {
-        await Process.run('netsh', args);
-      }
-    } catch (_) {}
-  }
-
-  Future<void> _startUdpBeacon() async {
-    try {
-      _udpBeaconSocket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
-      _udpBeaconSocket?.broadcastEnabled = true;
-
-      _beaconTimer = Timer.periodic(const Duration(seconds: 1), (_) {
-        if (!isRunning || !isHostMode) return;
-        final effectiveName = nicknameController.text.trim().isNotEmpty
-            ? nicknameController.text.trim()
-            : deviceName;
-
-        final msg = utf8.encode(json.encode({
-          'type': 'VOLTMATCH_HUB',
-          'ip': cachedLocalIp,
-          'name': effectiveName,
-        }));
-        // Limited broadcast (works on most LANs)
-        _udpBeaconSocket?.send(msg, InternetAddress('255.255.255.255'), 8082);
-        // Subnet-directed broadcast (more reliable on Wi-Fi, where limited
-        // broadcast packets are sometimes dropped by the AP)
-        try {
-          final parts = cachedLocalIp.split('.');
-          if (parts.length == 4) {
-            final bcast = '${parts[0]}.${parts[1]}.${parts[2]}.255';
-            _udpBeaconSocket?.send(msg, InternetAddress(bcast), 8082);
-          }
-        } catch (_) {}
-      });
-    } catch (_) {}
-  }
-
-  Future<void> _startAutoDiscovery() async {
-    if (isRunning) return;
-    setState(() {
-      isSearchingForHub = true;
-      discoveredHubIp = null;
-      discoveredHubName = null;
-      discoveredHubs.clear();
-      selectedHubIp = null;
-    });
-
-    try {
-      _udpListenSocket = await RawDatagramSocket.bind(
-        InternetAddress.anyIPv4,
-        8082,
-        reuseAddress: true,
-        reusePort: true,
-      );
-      _udpListenSocket?.listen((RawSocketEvent event) {
-        if (event == RawSocketEvent.read) {
-          final datagram = _udpListenSocket?.receive();
-          if (datagram != null) {
-            try {
-              final str = utf8.decode(datagram.data);
-              final data = json.decode(str) as Map<String, dynamic>;
-              if (data['type'] == 'VOLTMATCH_HUB') {
-                final sourceIp = datagram.address.address;
-                final hubIp = sourceIp.isNotEmpty ? sourceIp : (data['ip']?.toString() ?? '');
-                if (hubIp.isNotEmpty) {
-                  _onHubFound(hubIp, data['name'] ?? 'VoltMatch Hub');
-                }
-              }
-            } catch (_) {}
-          }
-        }
-      });
-    } catch (_) {}
-
-    _scanSubnetForHub();
-  }
-
-  Future<void> _scanSubnetForHub() async {
-    if (cachedLocalIp == '127.0.0.1') return;
-    final parts = cachedLocalIp.split('.');
-    if (parts.length != 4) return;
-    final subnet = '${parts[0]}.${parts[1]}.${parts[2]}';
-
-    final client = HttpClient()..connectionTimeout = const Duration(milliseconds: 350);
-
-    const chunkSize = 40;
-    for (int i = 1; i <= 254; i += chunkSize) {
-      if (!mounted || !isSearchingForHub) break;
-      final futures = <Future>[];
-      for (int j = i; j < i + chunkSize && j <= 254; j++) {
-        final target = '$subnet.$j';
-        if (target == cachedLocalIp) continue;
-
-        futures.add(() async {
-          try {
-            final req = await client.getUrl(Uri.parse('http://$target:8080/api/discover'));
-            final res = await req.close();
-            if (res.statusCode == HttpStatus.ok) {
-              final body = await utf8.decoder.bind(res).join();
-              final data = json.decode(body) as Map<String, dynamic>;
-              if (data['hub'] == true) {
-                _onHubFound(target, data['name'] ?? 'VoltMatch Hub');
-              }
-            }
-          } catch (_) {}
-        }());
-      }
-      await Future.wait(futures);
-    }
-    client.close(force: true);
-
-    if (mounted) {
-      setState(() {
-        isSearchingForHub = false;
-      });
-    }
-    _stopDiscovery();
-  }
-
-  void _onHubFound(String ip, String name) {
-    if (!mounted) return;
-    final exists = discoveredHubs.any((h) => h['ip'] == ip);
-    if (exists) return;
-    setState(() {
-      discoveredHubs.add({'ip': ip, 'name': name});
-      if (selectedHubIp == null) {
-        selectedHubIp = ip;
-        discoveredHubIp = ip;
-        discoveredHubName = name;
-        hubIpController.text = ip;
-      }
-    });
-  }
-
-  void _stopDiscovery() {
-    _beaconTimer?.cancel();
-    _udpBeaconSocket?.close();
-    _udpListenSocket?.close();
-    _udpBeaconSocket = null;
-    _udpListenSocket = null;
   }
 
   // ─────────────────────────────────────────────────────────────
@@ -535,6 +520,45 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
     final now = DateTime.now();
     _csvLog.add('${now.toIso8601String()},${data["name"]},${data["watts"]},${data["currentMA"]},${data["voltageV"]},${data["batteryPct"]},${data["tempC"]},${data["isCharging"]}');
     if (_csvLog.length > 5000) _csvLog.removeAt(1);
+  }
+
+  Future<void> _ensureWindowsFirewall() async {
+    try {
+      for (final args in [
+        ['advfirewall', 'firewall', 'add', 'rule', 'name=VoltMatch Hub TCP 8080', 'dir=in', 'action=allow', 'protocol=TCP', 'localport=8080', 'profile=any', 'enable=yes'],
+        ['advfirewall', 'firewall', 'add', 'rule', 'name=VoltMatch Discovery UDP 8082', 'dir=in', 'action=allow', 'protocol=UDP', 'localport=8082', 'profile=any', 'enable=yes'],
+      ]) {
+        await Process.run('netsh', args);
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _startUdpBeacon() async {
+    try {
+      _udpBeaconSocket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
+      _udpBeaconSocket?.broadcastEnabled = true;
+
+      _beaconTimer = Timer.periodic(const Duration(milliseconds: 500), (_) {
+        if (!isRunning || !isHostMode) return;
+        final effectiveName = nicknameController.text.trim().isNotEmpty
+            ? nicknameController.text.trim()
+            : deviceName;
+
+        final msg = utf8.encode(json.encode({
+          'type': 'VOLTMATCH_HUB',
+          'ip': cachedLocalIp,
+          'name': effectiveName,
+        }));
+        _udpBeaconSocket?.send(msg, InternetAddress('255.255.255.255'), 8082);
+        try {
+          final parts = cachedLocalIp.split('.');
+          if (parts.length == 4) {
+            final bcast = '${parts[0]}.${parts[1]}.${parts[2]}.255';
+            _udpBeaconSocket?.send(msg, InternetAddress(bcast), 8082);
+          }
+        } catch (_) {}
+      });
+    } catch (_) {}
   }
 
   // START: Host
@@ -665,6 +689,27 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
       return;
     }
 
+    bool isHubOnline = false;
+    try {
+      final client = HttpClient()..connectionTimeout = const Duration(seconds: 1);
+      final req = await client.getUrl(Uri.parse('http://$targetIp:8080/api/discover'));
+      final res = await req.close();
+      if (res.statusCode == HttpStatus.ok) {
+        isHubOnline = true;
+      }
+      client.close(force: true);
+    } catch (_) {}
+
+    if (!isHubOnline) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Target Hub at $targetIp is offline or closed!'),
+          backgroundColor: const Color(0xFFEF6464),
+        ),
+      );
+      return;
+    }
+
     if (Platform.isAndroid) {
       await platform.invokeMethod('acquireWakeLock');
     }
@@ -676,6 +721,7 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
     });
 
     final selfId = 'probe_${Platform.operatingSystem}_${cachedLocalIp.replaceAll('.', '_')}';
+    int consecutiveSendFailures = 0;
 
     _fastTimer = Timer.periodic(const Duration(milliseconds: 400), (_) async {
       await _fetchSelfStats();
@@ -699,7 +745,22 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
         }));
         final res = await req.close();
         await res.drain();
-      } catch (_) {}
+
+        consecutiveSendFailures = 0;
+      } catch (_) {
+        consecutiveSendFailures++;
+        if (consecutiveSendFailures >= 3) {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('Hub disconnected! Returning to radar scan...'),
+                backgroundColor: Color(0xFFEF6464),
+              ),
+            );
+          }
+          _stopSession();
+        }
+      }
     });
   }
 
@@ -709,7 +770,6 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
     _probeClient?.close(force: true);
     await _server?.close(force: true);
 
-    // Stop background service if active
     if (Platform.isAndroid) {
       await platform.invokeMethod('stopProbeService');
       await platform.invokeMethod('releaseWakeLock');
@@ -730,7 +790,7 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
     }
 
     if (!isHostMode) {
-      _startAutoDiscovery();
+      _startRealtimeAutoDiscovery();
     }
   }
 
@@ -744,10 +804,6 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
       ),
     );
   }
-
-  // ─────────────────────────────────────────────────────────────
-  // WEB DASHBOARD HTML
-  // ─────────────────────────────────────────────────────────────
 
   String _generateMultiDeviceHtmlDashboard() {
     return '''
@@ -1112,14 +1168,11 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
   }
 
   // ─────────────────────────────────────────────────────────────
-  // FLUTTER UI: MOBILE & DESKTOP SWITCHER
+  // FLUTTER UI: MOBILE & DESKTOP SWITCHER (WITH CLEAN POPUP MENU)
   // ─────────────────────────────────────────────────────────────
 
   @override
   Widget build(BuildContext context) {
-    // Show the in-app Mission Control dashboard whenever the hub is running,
-    // on both Windows (desktop) and Android, so users don't need to copy/paste
-    // the hub link into a browser.
     if (isRunning && isHostMode) {
       return _buildInAppDashboard();
     }
@@ -1207,7 +1260,7 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
                                 }
                               : () {
                                   setState(() => isHostMode = false);
-                                  _startAutoDiscovery();
+                                  _startRealtimeAutoDiscovery();
                                 },
                           child: Container(
                             padding: const EdgeInsets.symmetric(vertical: 10),
@@ -1246,39 +1299,78 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
               if (!isHostMode && !isRunning && discoveredHubs.length > 1) ...[
                 Padding(
                   padding: const EdgeInsets.only(bottom: 16),
-                  child: Container(
-                    padding: const EdgeInsets.all(12),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFF161D23),
-                      borderRadius: BorderRadius.circular(12),
-                      border: Border.all(color: Colors.white10),
-                    ),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        const Text('Multiple hubs found — choose one:', style: TextStyle(color: Colors.white70, fontSize: 12)),
-                        const SizedBox(height: 8),
-                        DropdownButtonFormField<String>(
-                          initialValue: selectedHubIp,
-                          items: discoveredHubs.map((h) {
-                            return DropdownMenuItem<String>(
-                              value: h['ip'],
-                              child: Text('${h['name']} (${h['ip']})'),
-                            );
-                          }).toList(),
-                          onChanged: (val) {
-                            if (val == null) return;
-                            final hub = discoveredHubs.firstWhere((h) => h['ip'] == val);
-                            setState(() {
-                              selectedHubIp = val;
-                              discoveredHubIp = val;
-                              discoveredHubName = hub['name'];
-                              hubIpController.text = val;
-                            });
-                          },
-                          decoration: const InputDecoration(border: OutlineInputBorder()),
+                  child: InkWell(
+                    onTap: () {
+                      showModalBottomSheet(
+                        context: context,
+                        backgroundColor: const Color(0xFF161D23),
+                        shape: const RoundedRectangleBorder(
+                          borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
                         ),
-                      ],
+                        builder: (ctx) => Container(
+                          padding: const EdgeInsets.all(20),
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Text(
+                                'Select Central Hub',
+                                style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.white),
+                              ),
+                              const SizedBox(height: 12),
+                              ...discoveredHubs.map((h) {
+                                final isSelected = h['ip'] == selectedHubIp;
+                                return ListTile(
+                                  tileColor: isSelected ? const Color(0xFF1C252C) : Colors.transparent,
+                                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                                  leading: const Icon(Icons.hub, color: Color(0xFF22BFA2)),
+                                  title: Text(h['name'] ?? 'Hub', style: const TextStyle(fontWeight: FontWeight.bold)),
+                                  subtitle: Text(h['ip'] ?? '', style: const TextStyle(color: Color(0xFFA7B0B9), fontSize: 12)),
+                                  trailing: isSelected ? const Icon(Icons.check_circle, color: Color(0xFF22BFA2)) : null,
+                                  onTap: () {
+                                    setState(() {
+                                      selectedHubIp = h['ip'];
+                                      discoveredHubIp = h['ip'];
+                                      discoveredHubName = h['name'];
+                                      hubIpController.text = h['ip']!;
+                                    });
+                                    Navigator.pop(ctx);
+                                  },
+                                );
+                              }),
+                            ],
+                          ),
+                        ),
+                      );
+                    },
+                    borderRadius: BorderRadius.circular(12),
+                    child: Container(
+                      padding: const EdgeInsets.all(14),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF161D23),
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: const Color(0xFF22BFA2).withOpacity(0.4)),
+                      ),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                const Text('Multiple Hubs Found — Tap to Switch:', style: TextStyle(color: Color(0xFFA7B0B9), fontSize: 11)),
+                                const SizedBox(height: 2),
+                                Text(
+                                  '$discoveredHubName ($discoveredHubIp)',
+                                  style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 13),
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ],
+                            ),
+                          ),
+                          const Icon(Icons.arrow_drop_down, color: Color(0xFF22BFA2)),
+                        ],
+                      ),
                     ),
                   ),
                 ),
@@ -1365,7 +1457,7 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
                         IconButton(
                           icon: const Icon(Icons.refresh, color: Color(0xFF3DDDB5), size: 20),
                           tooltip: 'Scan Again',
-                          onPressed: _startAutoDiscovery,
+                          onPressed: _startRealtimeAutoDiscovery,
                         ),
                     ],
                   ),
@@ -1439,7 +1531,6 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
                         },
                       ),
                     ] else ...[
-                      // Mobile Running View (Clean & Spacious - No Overflows!)
                       Row(
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [
@@ -1552,7 +1643,7 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
   }
 
   // ─────────────────────────────────────────────────────────────
-  // WINDOWS DESKTOP NATIVE WIDESCREEN DASHBOARD VIEW
+  // NATIVE IN-APP DASHBOARD VIEW (WITH CLEAN MOBILE POPUP MENU)
   // ─────────────────────────────────────────────────────────────
 
   Widget _buildInAppDashboard() {
@@ -1564,48 +1655,88 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
           children: [
             const Icon(Icons.bolt, color: Color(0xFF22BFA2)),
             const SizedBox(width: 8),
-            const Text(
-              'VoltMatch Desktop Mission Control',
-              style: TextStyle(fontWeight: FontWeight.bold, fontSize: 17),
+            Expanded(
+              child: Text(
+                Platform.isWindows ? 'VoltMatch Desktop Mission Control' : 'Hub Live Dashboard',
+                style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+                overflow: TextOverflow.ellipsis,
+              ),
             ),
           ],
         ),
         actions: [
-          IconButton(
-            icon: const Icon(Icons.volume_up, color: Color(0xFF3DDDB5)),
-            tooltip: 'Test Sound & Windows Notification',
-            onPressed: _testAlertSound,
-          ),
-          IconButton(
-            icon: const Icon(Icons.file_download, color: Color(0xFF3DDDB5)),
-            tooltip: 'Export CSV Log to Downloads',
-            onPressed: _exportCsvLog,
-          ),
-          IconButton(
-            icon: Icon(
-              enable80AlertSound ? Icons.notifications_active : Icons.notifications_off,
-              color: enable80AlertSound ? const Color(0xFF3DDDB5) : Colors.grey,
+          if (!Platform.isWindows) ...[
+            PopupMenuButton<String>(
+              icon: const Icon(Icons.more_vert, color: Colors.white),
+              color: const Color(0xFF1C252C),
+              onSelected: (val) {
+                if (val == 'test_sound') _testAlertSound();
+                if (val == 'export_csv') _exportCsvLog();
+                if (val == 'toggle_sound') {
+                  setState(() => enable80AlertSound = !enable80AlertSound);
+                }
+                if (val == 'copy_link') _copyLink();
+              },
+              itemBuilder: (context) => [
+                const PopupMenuItem(
+                  value: 'test_sound',
+                  child: Row(children: [Icon(Icons.volume_up, color: Color(0xFF3DDDB5), size: 18), SizedBox(width: 10), Text('Test Chime')]),
+                ),
+                const PopupMenuItem(
+                  value: 'export_csv',
+                  child: Row(children: [Icon(Icons.file_download, color: Color(0xFF3DDDB5), size: 18), SizedBox(width: 10), Text('Export CSV')]),
+                ),
+                PopupMenuItem(
+                  value: 'toggle_sound',
+                  child: Row(children: [
+                    Icon(enable80AlertSound ? Icons.notifications_active : Icons.notifications_off, color: const Color(0xFF3DDDB5), size: 18),
+                    const SizedBox(width: 10),
+                    Text(enable80AlertSound ? 'Sound: ON' : 'Sound: OFF')
+                  ]),
+                ),
+                const PopupMenuItem(
+                  value: 'copy_link',
+                  child: Row(children: [Icon(Icons.link, color: Color(0xFF22BFA2), size: 18), SizedBox(width: 10), Text('Copy Web Link')]),
+                ),
+              ],
             ),
-            tooltip: '80% Sound & Notification Alert',
-            onPressed: () {
-              setState(() => enable80AlertSound = !enable80AlertSound);
-            },
-          ),
-          IconButton(
-            icon: const Icon(Icons.link, color: Color(0xFF22BFA2)),
-            tooltip: 'Copy Web Link ($broadcastUrl)',
-            onPressed: _copyLink,
-          ),
+          ] else ...[
+            IconButton(
+              icon: const Icon(Icons.volume_up, color: Color(0xFF3DDDB5)),
+              tooltip: 'Test Sound & Windows Notification',
+              onPressed: _testAlertSound,
+            ),
+            IconButton(
+              icon: const Icon(Icons.file_download, color: Color(0xFF3DDDB5)),
+              tooltip: 'Export CSV Log to Downloads',
+              onPressed: _exportCsvLog,
+            ),
+            IconButton(
+              icon: Icon(
+                enable80AlertSound ? Icons.notifications_active : Icons.notifications_off,
+                color: enable80AlertSound ? const Color(0xFF3DDDB5) : Colors.grey,
+              ),
+              tooltip: '80% Sound & Notification Alert',
+              onPressed: () {
+                setState(() => enable80AlertSound = !enable80AlertSound);
+              },
+            ),
+            IconButton(
+              icon: const Icon(Icons.link, color: Color(0xFF22BFA2)),
+              tooltip: 'Copy Web Link ($broadcastUrl)',
+              onPressed: _copyLink,
+            ),
+          ],
           Padding(
-            padding: const EdgeInsets.only(right: 12),
-            child: ElevatedButton.icon(
-              style: ElevatedButton.styleFrom(
+            padding: const EdgeInsets.only(right: 8),
+            child: TextButton.icon(
+              style: TextButton.styleFrom(
                 backgroundColor: const Color(0xFFEF6464),
                 foregroundColor: Colors.white,
-                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
               ),
-              icon: const Icon(Icons.stop, size: 18),
-              label: const Text('Stop Hub'),
+              icon: const Icon(Icons.stop, size: 16),
+              label: const Text('Stop', style: TextStyle(fontSize: 12)),
               onPressed: _stopSession,
             ),
           ),
@@ -1701,6 +1832,8 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
     final double temp = (d['tempC'] as num?)?.toDouble() ?? 0.0;
     final double maxW = (d['maxChargingWatts'] as num?)?.toDouble() ?? 0.0;
     final bool isAt80 = bat >= 80 && isChg;
+    final String deviceId = d['id']?.toString() ?? '';
+    final bool isMuted = _mutedDevices[deviceId] == true;
 
     final tempColor = temp > 40 ? const Color(0xFFEF6464) : (temp > 36 ? const Color(0xFFF5B544) : const Color(0xFF2ECC91));
 
@@ -1730,10 +1863,27 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
                 borderRadius: BorderRadius.circular(8),
                 border: Border.all(color: const Color(0xFFF5B544)),
               ),
-              child: const Text(
-                '🔔 80% Reached — Unplug Ready',
-                textAlign: TextAlign.center,
-                style: TextStyle(color: Color(0xFFF5B544), fontWeight: FontWeight.bold, fontSize: 11),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  const Text(
+                    '🔔 80% Reached — Unplug Ready',
+                    style: TextStyle(color: Color(0xFFF5B544), fontWeight: FontWeight.bold, fontSize: 11),
+                  ),
+                  const SizedBox(width: 8),
+                  InkWell(
+                    onTap: () {
+                      setState(() {
+                        _mutedDevices[deviceId] = !isMuted;
+                      });
+                    },
+                    child: Icon(
+                      isMuted ? Icons.notifications_off : Icons.notifications_active,
+                      size: 14,
+                      color: const Color(0xFFF5B544),
+                    ),
+                  ),
+                ],
               ),
             ),
           ],
@@ -1748,20 +1898,40 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
                   style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15, color: Colors.white),
                 ),
               ),
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                decoration: BoxDecoration(
-                  color: isChg ? const Color(0xFF2ECC91).withOpacity(0.15) : Colors.white10,
-                  borderRadius: BorderRadius.circular(10),
-                ),
-                child: Text(
-                  isChg ? '⚡ Charging' : 'Unplugged',
-                  style: TextStyle(
-                    color: isChg ? const Color(0xFF2ECC91) : const Color(0xFFA7B0B9),
-                    fontWeight: FontWeight.bold,
-                    fontSize: 10,
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  IconButton(
+                    constraints: const BoxConstraints(),
+                    padding: const EdgeInsets.only(right: 8),
+                    icon: Icon(
+                      isMuted ? Icons.volume_off : Icons.volume_up,
+                      size: 16,
+                      color: isMuted ? Colors.grey : const Color(0xFF3DDDB5),
+                    ),
+                    tooltip: isMuted ? 'Unmute 80% Chime for this device' : 'Mute 80% Chime for this device',
+                    onPressed: () {
+                      setState(() {
+                        _mutedDevices[deviceId] = !isMuted;
+                      });
+                    },
                   ),
-                ),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                    decoration: BoxDecoration(
+                      color: isChg ? const Color(0xFF2ECC91).withOpacity(0.15) : Colors.white10,
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: Text(
+                      isChg ? '⚡ Charging' : 'Unplugged',
+                      style: TextStyle(
+                        color: isChg ? const Color(0xFF2ECC91) : const Color(0xFFA7B0B9),
+                        fontWeight: FontWeight.bold,
+                        fontSize: 10,
+                      ),
+                    ),
+                  ),
+                ],
               ),
             ],
           ),

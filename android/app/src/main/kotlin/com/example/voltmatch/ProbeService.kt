@@ -69,10 +69,6 @@ class ProbeService : Service() {
         isRunning = true
         createNotificationChannel()
 
-        // 1. Load last known Hub IP from memory so it connects in 0 seconds!
-        val prefs = getSharedPreferences("voltmatch_probe_prefs", Context.MODE_PRIVATE)
-        targetHubIp = prefs.getString("last_known_hub_ip", null)
-
         val filter = IntentFilter().apply {
             addAction(Intent.ACTION_POWER_CONNECTED)
             addAction(Intent.ACTION_POWER_DISCONNECTED)
@@ -111,6 +107,7 @@ class ProbeService : Service() {
 
                 // STATE 1: No Wi-Fi
                 if (!hasWifi) {
+                    targetHubIp = null
                     updateNotification("⚠️ Waiting for Wi-Fi connection...")
                     delay(1000)
                     continue
@@ -118,19 +115,29 @@ class ProbeService : Service() {
 
                 // STATE 2: Wi-Fi on, but Charger unplugged
                 if (!hasPower) {
+                    targetHubIp = null
                     updateNotification("🔌 Connect charger to start streaming")
                     delay(800)
                     continue
                 }
 
-                // STATE 3: Wi-Fi on & Charger plugged in -> Discover Hub if we don't have an IP
-                if (targetHubIp == null) {
-                    updateNotification("Streaming...")
-                    discoverHub()
-                    continue
+                // STATE 3: Verify if current targetHubIp is still alive, otherwise clear and rediscover
+                if (targetHubIp != null && !pingHub(targetHubIp!!)) {
+                    targetHubIp = null
                 }
 
-                // STATE 4: Actively Stream to Hub
+                // STATE 4: Discover Hub if we don't have a live IP
+                if (targetHubIp == null) {
+                    updateNotification("Searching for Central Hub...")
+                    discoverHub()
+                    if (targetHubIp == null) {
+                        updateNotification("No Central Hub available")
+                        delay(2000)
+                        continue
+                    }
+                }
+
+                // STATE 5: Actively Stream to Verified Live Hub
                 val ip = targetHubIp ?: continue
                 val payload = sampleBatteryTelemetry()
                 val watts = payload.optDouble("watts", 0.0)
@@ -142,12 +149,11 @@ class ProbeService : Service() {
                     updateNotification("⚡ Streaming to $ip ($wStr W)")
                 } else {
                     failCount++
-                    // Only reset IP if it fails 25 times in a row (> 10 full seconds of complete failure!)
-                    if (failCount >= 25) {
+                    if (failCount >= 3) {
                         targetHubIp = null
                         failCount = 0
-                        updateNotification("📡 No Central Hub available on Wi-Fi")
-                        delay(2000)
+                        updateNotification("No Central Hub available")
+                        delay(1500)
                     }
                 }
 
@@ -161,16 +167,7 @@ class ProbeService : Service() {
         isDiscovering = true
 
         withContext(Dispatchers.IO) {
-            // 1. Quick check: Is the last known IP still alive?
-            val prefs = getSharedPreferences("voltmatch_probe_prefs", Context.MODE_PRIVATE)
-            val savedIp = prefs.getString("last_known_hub_ip", null)
-            if (savedIp != null && pingHub(savedIp)) {
-                targetHubIp = savedIp
-                isDiscovering = false
-                return@withContext
-            }
-
-            // 2. Fast UDP listener (1.2s timeout)
+            // 1. Fast UDP listener (1.2s timeout)
             try {
                 val socket = DatagramSocket(8082).apply { soTimeout = 1200 }
                 val buf = ByteArray(1024)
@@ -179,13 +176,9 @@ class ProbeService : Service() {
                 val msg = String(packet.data, 0, packet.length)
                 val json = JSONObject(msg)
                 if (json.optString("type") == "VOLTMATCH_HUB") {
-                    // Prefer the packet's source address: it is always the real,
-                    // reachable address of the host (the advertised IP may be
-                    // wrong when the host has virtual adapters).
                     val foundIp = packet.address?.hostAddress ?: json.optString("ip")
-                    if (foundIp.isNotEmpty()) {
+                    if (foundIp.isNotEmpty() && pingHub(foundIp)) {
                         targetHubIp = foundIp
-                        prefs.edit().putString("last_known_hub_ip", foundIp).apply()
                         socket.close()
                         isDiscovering = false
                         return@withContext
@@ -194,7 +187,7 @@ class ProbeService : Service() {
                 socket.close()
             } catch (e: Exception) {}
 
-            // 3. Parallel Subnet scan in safe chunks of 30
+            // 2. Parallel Subnet scan fallback
             val localIp = getLocalIpAddress()
             if (localIp != null && localIp.contains(".")) {
                 val subnet = localIp.substringBeforeLast(".")
@@ -208,7 +201,6 @@ class ProbeService : Service() {
                             launch {
                                 if (pingHub(testIp)) {
                                     targetHubIp = testIp
-                                    prefs.edit().putString("last_known_hub_ip", testIp).apply()
                                 }
                             }
                         }
@@ -273,7 +265,6 @@ class ProbeService : Service() {
 
     private val batteryManager by lazy { getSystemService(Context.BATTERY_SERVICE) as BatteryManager }
 
-    // ROCK-SOLID HTTP SENDER (FixedLengthStreamingMode guarantees zero socket crashes)
     private fun sendTelemetry(hubIp: String, json: JSONObject): Boolean {
         var conn: HttpURLConnection? = null
         return try {
@@ -285,11 +276,10 @@ class ProbeService : Service() {
                 doOutput = true
                 doInput = true
                 useCaches = false
-                connectTimeout = 2000
-                readTimeout = 2000
+                connectTimeout = 1000
+                readTimeout = 1000
                 setRequestProperty("Content-Type", "application/json; charset=utf-8")
                 setRequestProperty("Accept", "application/json")
-                // Tell Android the exact byte length to prevent chunked EOFException!
                 setFixedLengthStreamingMode(jsonBytes.size)
             }
 
@@ -303,7 +293,6 @@ class ProbeService : Service() {
                 conn.inputStream?.bufferedReader()?.use { it.readText() }
                 true
             } else {
-                conn.errorStream?.bufferedReader()?.use { it.readText() }
                 false
             }
         } catch (e: Exception) {

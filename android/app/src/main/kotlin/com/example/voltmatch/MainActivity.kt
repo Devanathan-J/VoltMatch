@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.hardware.usb.UsbManager
+import android.media.RingtoneManager
 import android.os.BatteryManager
 import android.os.Build
 import android.os.PowerManager
@@ -24,7 +25,19 @@ class MainActivity: FlutterActivity() {
 
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL).setMethodCallHandler { call, result ->
             when (call.method) {
-                // 1. UNIVERSAL NOTIFICATION CHECK & REQUEST (Works on Android 10, 11, 12, 13, 14+)
+                // 1. PLAY NATIVE LOUD NOTIFICATION CHIME (Android Central Hub)
+                "playSystemChime" -> {
+                    try {
+                        val notificationUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
+                        val ringtone = RingtoneManager.getRingtone(applicationContext, notificationUri)
+                        ringtone?.play()
+                        result.success(true)
+                    } catch (e: Exception) {
+                        result.success(false)
+                    }
+                }
+
+                // 2. UNIVERSAL NOTIFICATION CHECK & REQUEST (Android 10 - 14+)
                 "areNotificationsEnabled" -> {
                     val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
@@ -37,13 +50,11 @@ class MainActivity: FlutterActivity() {
                 "requestNotificationPermission" -> {
                     val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                        // Android 13+ system dialog
                         if (!nm.areNotificationsEnabled()) {
                             requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 101)
                         }
                         result.success(true)
                     } else {
-                        // Android 10, 11, 12 (Samsung A21s, etc.) - Opens Notification Settings directly!
                         try {
                             val intent = Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
                                 putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
@@ -60,7 +71,7 @@ class MainActivity: FlutterActivity() {
                     }
                 }
 
-                // 2. UNIVERSAL BATTERY OPTIMIZATION CONTROLS
+                // 3. UNIVERSAL BATTERY OPTIMIZATION CONTROLS
                 "isBatteryOptimizationIgnored" -> {
                     val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
@@ -79,7 +90,6 @@ class MainActivity: FlutterActivity() {
                             startActivity(intent)
                             result.success(true)
                         } catch (e: Exception) {
-                            // Fallback to app details
                             val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
                                 data = android.net.Uri.parse("package:$packageName")
                             }
@@ -99,7 +109,7 @@ class MainActivity: FlutterActivity() {
                     result.success(true)
                 }
 
-                // 3. HARDWARE AUTO-DETECTION
+                // 4. HARDWARE AUTO-DETECTION
                 "getDeviceInfo" -> {
                     val manufacturer = Build.MANUFACTURER.replaceFirstChar { it.uppercase() }
                     val model = Build.MODEL
@@ -115,7 +125,7 @@ class MainActivity: FlutterActivity() {
                     ))
                 }
 
-                // 4. LIVE POWER TELEMETRY
+                // 5. LIVE POWER TELEMETRY
                 "getLivePowerStats" -> {
                     val batteryManager = getSystemService(Context.BATTERY_SERVICE) as BatteryManager
                     val ifilter = IntentFilter(Intent.ACTION_BATTERY_CHANGED)
@@ -161,7 +171,7 @@ class MainActivity: FlutterActivity() {
                     ))
                 }
 
-                // 5. WAKELOCKS
+                // 6. WAKELOCKS
                 "acquireWakeLock" -> {
                     val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
                     wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "VoltMatch::MonitorWakelock")
@@ -174,7 +184,7 @@ class MainActivity: FlutterActivity() {
                     result.success(true)
                 }
 
-                // 6. QUICK SETTINGS TILE SYNC
+                // 7. QUICK SETTINGS TILE SYNC
                 "isProbeServiceRunning" -> result.success(ProbeService.isRunning)
 
                 "stopProbeService" -> {
