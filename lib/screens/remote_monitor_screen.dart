@@ -30,6 +30,8 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
   bool isSearchingForHub = false;
   String? discoveredHubName;
   String? discoveredHubIp;
+  final List<Map<String, String>> discoveredHubs = [];
+  String? selectedHubIp;
   RawDatagramSocket? _udpBeaconSocket;
   RawDatagramSocket? _udpListenSocket;
   Timer? _beaconTimer;
@@ -372,6 +374,8 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
       isSearchingForHub = true;
       discoveredHubIp = null;
       discoveredHubName = null;
+      discoveredHubs.clear();
+      selectedHubIp = null;
     });
 
     try {
@@ -414,7 +418,7 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
 
     const chunkSize = 40;
     for (int i = 1; i <= 254; i += chunkSize) {
-      if (discoveredHubIp != null || !mounted || !isSearchingForHub) break;
+      if (!mounted || !isSearchingForHub) break;
       final futures = <Future>[];
       for (int j = i; j < i + chunkSize && j <= 254; j++) {
         final target = '$subnet.$j';
@@ -438,22 +442,27 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
     }
     client.close(force: true);
 
-    if (mounted && discoveredHubIp == null) {
+    if (mounted) {
       setState(() {
         isSearchingForHub = false;
       });
     }
+    _stopDiscovery();
   }
 
   void _onHubFound(String ip, String name) {
-    if (!mounted || discoveredHubIp != null) return;
+    if (!mounted) return;
+    final exists = discoveredHubs.any((h) => h['ip'] == ip);
+    if (exists) return;
     setState(() {
-      discoveredHubIp = ip;
-      discoveredHubName = name;
-      hubIpController.text = ip;
-      isSearchingForHub = false;
+      discoveredHubs.add({'ip': ip, 'name': name});
+      if (selectedHubIp == null) {
+        selectedHubIp = ip;
+        discoveredHubIp = ip;
+        discoveredHubName = name;
+        hubIpController.text = ip;
+      }
     });
-    _stopDiscovery();
   }
 
   void _stopDiscovery() {
@@ -1108,8 +1117,10 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
 
   @override
   Widget build(BuildContext context) {
-    // ONLY show the widescreen Mission Control dashboard on Windows Desktop!
-    if (isRunning && isHostMode && Platform.isWindows) {
+    // Show the in-app Mission Control dashboard whenever the hub is running,
+    // on both Windows (desktop) and Android, so users don't need to copy/paste
+    // the hub link into a browser.
+    if (isRunning && isHostMode) {
       return _buildInAppDashboard();
     }
 
@@ -1231,6 +1242,47 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
                   ),
                 ),
               ),
+
+              if (!isHostMode && !isRunning && discoveredHubs.length > 1) ...[
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 16),
+                  child: Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF161D23),
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: Colors.white10),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text('Multiple hubs found — choose one:', style: TextStyle(color: Colors.white70, fontSize: 12)),
+                        const SizedBox(height: 8),
+                        DropdownButtonFormField<String>(
+                          initialValue: selectedHubIp,
+                          items: discoveredHubs.map((h) {
+                            return DropdownMenuItem<String>(
+                              value: h['ip'],
+                              child: Text('${h['name']} (${h['ip']})'),
+                            );
+                          }).toList(),
+                          onChanged: (val) {
+                            if (val == null) return;
+                            final hub = discoveredHubs.firstWhere((h) => h['ip'] == val);
+                            setState(() {
+                              selectedHubIp = val;
+                              discoveredHubIp = val;
+                              discoveredHubName = hub['name'];
+                              hubIpController.text = val;
+                            });
+                          },
+                          decoration: const InputDecoration(border: OutlineInputBorder()),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
 
               // PROBE MODE: Radar Card
               if (!isHostMode && !isRunning) ...[
