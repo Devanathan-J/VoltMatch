@@ -6,7 +6,7 @@
 
 <p align="center">
   <strong>Know Before You Connect.</strong><br>
-  The ultimate cross-platform utility to check charger compatibility, monitor live watts, and track multi-device charging from your desktop.
+  Cross-Platform USB-C Compatibility Checker, Live Hardware Power Meter & Multi-Device Screen-Off Telemetry Hub.
 </p>
 
 <p align="center">
@@ -35,9 +35,9 @@
 
 ## 🎯 Who is VoltMatch for?
 
-If you manage **multiple devices** (smartphones, tablets, work phones) while working at your laptop or desktop, **VoltMatch is built for you**. 
+If you manage **multiple devices** (smartphones, tablets, work devices) while working at your laptop or desktop, **VoltMatch is built for you**. 
 
-We’ve all been there: you plug in your phone in another room, get deep into work, and completely forget about it—leading to overcharged batteries and excess heat. VoltMatch lets you monitor all your charging devices live on your computer monitor and sounds a gentle chime when any device reaches **80%**, so you never forget to unplug!
+We’ve all been there: you plug in your phone across the room, get deep into work, and completely forget about it—leading to overcharged batteries and excess heat. VoltMatch lets you monitor all your charging devices live on your computer monitor and sounds a gentle chime when any device reaches **80%**, so you never forget to unplug!
 
 ---
 
@@ -46,16 +46,17 @@ We’ve all been there: you plug in your phone in another room, get deep into wo
 - **🧩 Smart Compatibility Checker**: Select or 1-tap auto-detect your phone model to instantly verify if your USB-C charger and cable will deliver safe, fast power.
 - **⚡ Live Hardware Power Meter**: Measure real-time Watts, milliamps, voltage, and battery thermals directly from your phone or laptop hardware.
 - **📡 Multi-Device Telemetry Hub**: Stream charging curves from up to 10 phones simultaneously onto a single screen while phone screens stay completely **OFF**.
-- **🔔 80% Battery Safeguard**: Sounds an alert chime every 10 seconds and pops up desktop notifications when your batteries reach 80% health capacity.
+- **📈 Live Power Oscilloscope**: High-performance real-time waveform with ambient glow gradients, dynamic auto-scaling, and a pulsing live beacon tracking your charging current.
+- **🔔 80% Battery Safeguard**: Sounds an alert chime every 10 seconds and pops up desktop notifications when batteries reach 80% health capacity—with per-device mute controls.
 
 ---
 
-## ✨ Key Features & Debugging Architecture
+## ✨ Key Features & Technical Highlights
 
 ### 1. 🧩 Smart Multi-Brand Compatibility Checker
 - **Brand & Model Filtering**: Filter across **Apple, Samsung, iQOO/Vivo, OnePlus, Xiaomi, Google Pixel, Nothing, Motorola, and Laptops**.
 - **✨ 1-Tap Hardware Auto-Detection**: Cross-references internal Android hardware model codes (e.g., `I2206` $\rightarrow$ *iQOO Z6 44W*, `SM-A217F` $\rightarrow$ *Samsung Galaxy A21s*) mapped from the open-source `KHwang9883/MobileModels` database.
-- **Deterministic Math**: Evaluates voltages, current limits, and cable bottlenecks ($V \times I = W$) to deliver 4 clear safety verdicts.
+- **Deterministic Math**: Evaluates voltages, current limits, and cable bottlenecks ($V \times I = W$) to deliver 4 clear safety verdicts (*Compatible, Limited, Incompatible, Cannot Verify*).
 
 ### 2. ⚡ Live Hardware Power Meter & Cable Tester
 - **Real-Time Electricity Gauging**: Live Watts, milliamps ($\text{mA}$), and Volts updated every 300ms–400ms.
@@ -63,12 +64,20 @@ We’ve all been there: you plug in your phone in another room, get deep into wo
 - **Laptop Power Detection (Windows)**: Reads real-time battery charge rates in Watts via WMI/ACPI on Windows laptops, and detects direct AC wall power on desktop towers.
 - **Cable Data-Line Inspector**: Tests connected cables for active **Data Lines (D+/D-)** vs **Charge-Only** wires.
 
-### 3. 🖥️ Native Windows Mission Control (`.exe`) & Android Quick Access
-- **In-App Desktop Dashboard**: Transforms the Windows `.exe` window into a widescreen Mission Control grid with 60 FPS sparkline charts.
-- **Windows 10/11 Toast Notifications & Chime**: Pops up native notification banners and plays synchronous audio alerts when devices reach 80%+.
-- **Administrator / Firewall Access (required to discover devices)**: `voltmatch.exe` runs with Administrator privileges (UAC prompt) so it can add the inbound Windows Firewall rules needed to discover and receive telemetry from phones. Without admin access, phones may not show up.
+### 3. 📈 Real-Time Power Oscilloscope & Live Metrics
+- **Dynamic Waveform**: Smooth custom painter renders charging dynamics with ambient gradient shadows below the curve.
+- **Live Beacon Dot**: A pulsing indicator actively rides the crest of the curve, visually tracking power delivery in real-time.
+- **Adaptive Auto-Centering**: Automatically scales low-wattage trickle charging (e.g., 1.6W) to prevent flatlining against the floor of the graph.
+- **⏱️ Live Charge Countdown**: Real-time estimations calculate **Time-to-80%** and **Time-to-100%** based on battery capacity and instantaneous draw.
+- **Charger Utilization Meter**: Displays real-time absorption efficiency against the charger's hardware ceiling.
+
+### 4. 🖥️ Native Windows Mission Control (`.exe`) & Android Quick Access
+- **In-App Desktop Dashboard**: Transforms the Windows `.exe` window into an auto-resizing Mission Control grid.
+- **Windows 10/11 Toast Notifications & Chime**: Pops up native system notification banners and plays synchronous audio alerts when devices reach 80%+.
+- **Android Central Hub Chime**: Plays loud notification ringtones via `RingtoneManager` with haptic feedback when hosting on an Android device.
+- **🔕 Per-Device Mute Switches**: Toggle audio alerts on individual device cards without silencing other devices on the hub.
 - **📥 CSV Session Exporter**: Export full multi-device charging sessions with timestamps, Watts, and thermals to your `Downloads` folder with one click.
-- **⚡ Android Quick Settings Tile**: Add VoltMatch to your phone's swipe-down notification shade for 1-tap background streaming without opening the app.
+- **⚡ Android Quick Settings Tile**: Add VoltMatch to your phone's notification shade for 1-tap background streaming with the screen locked.
 
 ---
 
@@ -95,20 +104,20 @@ When opening VoltMatch for the first time, complete the quick setup dialog to en
 4. **View your PC monitor:**
    - Your phone will auto-connect via Zero-Config UDP discovery and stream live wattage curves side-by-side!
 
-> **Windows Firewall / Admin access (required to see other devices):** `voltmatch.exe` requests Administrator privileges on launch (UAC prompt) so it can add the inbound Windows Firewall rules it needs. **If you do not run it as Administrator (or decline the UAC prompt), inbound connections on the Wi-Fi (Public) profile are usually blocked and your phones will not be discovered — devices will not show up.** In that case, run `voltmatch.exe` as Administrator once so it can add the firewall rules, or manually allow **VoltMatch** through Windows Firewall for TCP port `8080` and UDP port `8082`. Also make sure the PC and phone are on the same subnet.
+> **Windows Firewall / Admin access (required to see other devices):** `voltmatch.exe` requests Administrator privileges on launch (UAC prompt) so it can add the inbound Windows Firewall rules it needs. If you decline the UAC prompt, inbound connections on the Wi-Fi profile may be blocked by Windows. In that case, manually allow **VoltMatch** through Windows Firewall for TCP port `8080` and UDP port `8082`.
 
 ---
 
-## � Direct Downloads
+## 📥 Direct Downloads
 
 | Platform | Status | Download Link |
 | :--- | :--- | :--- |
-| **Android (APK)** | Active | *[Download APK](https://github.com/Devanathan-J/VoltMatch/releases/download/v1.0.0/VoltMatch_v1.0.0_release.apk)* |
-| **Windows (.exe)** | Active | *[Download EXE](https://github.com/Devanathan-J/VoltMatch/releases/download/v1.0.0/VoltMatch_Windows_v1.0.0.zip)* |
+| **Android (APK)** | Active | [Download APK v1.0.0](https://github.com/Devanathan-J/VoltMatch/releases/download/v1.0.0/VoltMatch_v1.0.0_release.apk) |
+| **Windows (.exe)** | Active | [Download Windows v1.0.0](https://github.com/Devanathan-J/VoltMatch/releases/download/v1.0.0/VoltMatch_Windows_v1.0.0.zip) |
 | **iOS (IPA)** | 🟡 Coming Soon | *Link will be added here* |
 
 ---
 
-## �📄 License
+## 📄 License
 
 This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
