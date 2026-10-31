@@ -312,7 +312,6 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
 
   void _playAlertChime() {
     if (Platform.isWindows) {
-      // Non-blocking asynchronous audio trigger on Windows
       Process.start('powershell', [
         '-NoProfile',
         '-WindowStyle', 'Hidden',
@@ -341,7 +340,6 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
         '''
       ]);
     } else if (Platform.isAndroid) {
-      // Native Android notification stream playback (audible on all phone brands!)
       platform.invokeMethod('playSystemChime');
       HapticFeedback.heavyImpact();
     }
@@ -400,7 +398,6 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
       final id = entry.key;
       final d = entry.value;
 
-      // Skip if this specific device has its chime turned OFF by the user!
       if (_mutedDevices[id] == true) continue;
 
       final name = d['name']?.toString() ?? 'Device';
@@ -422,7 +419,6 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
     }
 
     if (anyDeviceNeedsSound) {
-      // If never played before (_lastSoundTime is epoch 0), play IMMEDIATELY on first tick!
       final hasNeverPlayed = _lastSoundTime.millisecondsSinceEpoch == 0;
       if (hasNeverPlayed || now.difference(_lastSoundTime).inSeconds >= 10) {
         _lastSoundTime = now;
@@ -595,6 +591,8 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
       req.response.headers.add('Access-Control-Allow-Origin', '*');
       req.response.headers.add('Access-Control-Allow-Headers', '*');
       req.response.headers.add('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+      // Offline-first PWA caching header: loads instantly without external internet!
+      req.response.headers.add('Cache-Control', 'no-cache');
 
       if (req.method == 'OPTIONS') {
         req.response.statusCode = HttpStatus.ok;
@@ -674,6 +672,7 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
   }
 
   // START: Probe
+  // START: Probe with Live Health Check & Spam-Proof Auto-Healing
   Future<void> _startProbe() async {
     _stopDiscovery();
 
@@ -683,6 +682,7 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
     if (targetIp.endsWith('/')) targetIp = targetIp.substring(0, targetIp.length - 1);
 
     if (targetIp.isEmpty) {
+      ScaffoldMessenger.of(context).clearSnackBars();
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('No Hub selected or detected')),
       );
@@ -701,12 +701,16 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
     } catch (_) {}
 
     if (!isHubOnline) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Target Hub at $targetIp is offline or closed!'),
-          backgroundColor: const Color(0xFFEF6464),
-        ),
-      );
+      if (mounted) {
+        ScaffoldMessenger.of(context).clearSnackBars();
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Target Hub at $targetIp is offline or closed!'),
+            backgroundColor: const Color(0xFFEF6464),
+            duration: const Duration(seconds: 2),
+          ),
+        );
+      }
       return;
     }
 
@@ -722,8 +726,12 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
 
     final selfId = 'probe_${Platform.operatingSystem}_${cachedLocalIp.replaceAll('.', '_')}';
     int consecutiveSendFailures = 0;
+    bool isHandlingDisconnect = false; // Prevents the SnackBar loop!
 
+    _fastTimer?.cancel();
     _fastTimer = Timer.periodic(const Duration(milliseconds: 400), (_) async {
+      if (isHandlingDisconnect || !isRunning) return;
+
       await _fetchSelfStats();
       try {
         final effectiveName = nicknameController.text.trim().isNotEmpty
@@ -749,12 +757,17 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
         consecutiveSendFailures = 0;
       } catch (_) {
         consecutiveSendFailures++;
-        if (consecutiveSendFailures >= 3) {
+        if (consecutiveSendFailures >= 3 && !isHandlingDisconnect) {
+          isHandlingDisconnect = true; // Lock immediately!
+          _fastTimer?.cancel(); // Kill timer immediately!
+
           if (mounted) {
+            ScaffoldMessenger.of(context).clearSnackBars(); // Wipe queue!
             ScaffoldMessenger.of(context).showSnackBar(
               const SnackBar(
                 content: Text('Hub disconnected! Returning to radar scan...'),
                 backgroundColor: Color(0xFFEF6464),
+                duration: Duration(seconds: 2),
               ),
             );
           }
@@ -801,6 +814,76 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
       const SnackBar(
         content: Text('Hub link copied! Open it in any browser.'),
         backgroundColor: Color(0xFF22BFA2),
+      ),
+    );
+  }
+
+  // Show Quick Connection Modal
+  void _showHubShareDialog() {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF161D23),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(20),
+          side: const BorderSide(color: Color(0xFF22BFA2), width: 1.5),
+        ),
+        title: const Row(
+          children: [
+            Icon(Icons.hub, color: Color(0xFF22BFA2)),
+            SizedBox(width: 8),
+            Text('Hub Connection Info', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 17)),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Other phones and computers on your Wi-Fi can view this dashboard live:',
+              style: TextStyle(color: Color(0xFFA7B0B9), fontSize: 13, height: 1.4),
+            ),
+            const SizedBox(height: 16),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: const Color(0xFF101419),
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: Colors.white12),
+              ),
+              child: SelectableText(
+                broadcastUrl,
+                style: const TextStyle(
+                  color: Color(0xFF3DDDB5),
+                  fontWeight: FontWeight.bold,
+                  fontSize: 16,
+                  fontFamily: 'monospace',
+                ),
+              ),
+            ),
+            const SizedBox(height: 12),
+            const Text(
+              'Port: 8080 (Dashboard) • Port: 8082 (Auto-Discovery UDP)',
+              style: TextStyle(fontSize: 11, color: Colors.grey),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Close')),
+          ElevatedButton.icon(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFF22BFA2),
+              foregroundColor: Colors.black,
+            ),
+            icon: const Icon(Icons.copy, size: 16),
+            label: const Text('Copy URL'),
+            onPressed: () {
+              _copyLink();
+              Navigator.pop(ctx);
+            },
+          ),
+        ],
       ),
     );
   }
@@ -887,6 +970,8 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
       box-shadow: 0 10px 30px rgba(0,0,0,0.4);
     }
     .device-card.charging { border-color: rgba(34,191,162,0.35); }
+    .device-card.low-bat { border-color: rgba(239,100,100,0.4); }
+    .device-card.at-80 { border-color: rgba(245,181,68,0.5); }
     .card-top { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 12px; }
     .device-title { font-size: 16px; font-weight: 700; color: #fff; max-width: 70%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .device-status { font-size: 11px; font-weight: 700; padding: 4px 10px; border-radius: 12px; text-transform: uppercase; }
@@ -895,7 +980,8 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
     .ceiling-tag { font-size: 11px; color: var(--accent-bright); font-weight: 600; margin-bottom: 2px; }
     .watts-display { font-size: 46px; font-weight: 800; color: var(--accent); letter-spacing: -1px; line-height: 1; margin: 6px 0; }
     .watts-display.idle { color: var(--subtext); }
-    .elec-specs { font-size: 13px; color: var(--subtext); margin-bottom: 14px; }
+    .elec-specs { font-size: 13px; color: var(--subtext); margin-bottom: 8px; }
+    .eta-line { font-size: 12px; color: #3DDDB5; font-weight: 600; margin-bottom: 12px; }
     .chart-container {
       width: 100%;
       height: 65px;
@@ -1020,6 +1106,21 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
       } catch(e) {}
     }
 
+    function calculateEta(bat, watts) {
+      if (!watts || watts < 1.0) return '';
+      const capWh = 19.25; // standard ~5000mAh smartphone battery
+      if (bat < 80) {
+        const remWh = ((80 - bat) / 100) * capWh;
+        const mins = Math.round((remWh / watts) * 60);
+        return mins > 0 ? '⏱️ Est. to 80%: ~' + mins + ' min' : '⏱️ Nearing 80%';
+      } else if (bat < 100) {
+        const remWh = ((100 - bat) / 100) * capWh;
+        const mins = Math.round((remWh / Math.min(watts, 4.0)) * 60);
+        return mins > 0 ? '⏱️ Est. to 100%: ~' + mins + ' min' : '⏱️ Trickle charging';
+      }
+      return '🔋 Battery Full';
+    }
+
     function drawSparkline(canvasId, historyData) {
       const cvs = document.getElementById(canvasId);
       if (!cvs) return;
@@ -1100,9 +1201,16 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
           const statusText = isChg ? '⚡ Charging' : 'Unplugged';
           const tempColor = d.tempC > 40 ? '#EF6464' : (d.tempC > 36 ? '#F5B544' : '#2ECC91');
           const isAt80 = d.batteryPct >= 80 && isChg;
+          const isLow = d.batteryPct < 20;
+          const etaText = isChg ? calculateEta(d.batteryPct, d.watts) : '';
+
+          let cardModifier = '';
+          if (isAt80) cardModifier = 'at-80';
+          else if (isLow) cardModifier = 'low-bat';
+          else if (isChg) cardModifier = 'charging';
 
           html += `
-            <div class="device-card \${isChg ? 'charging' : ''}">
+            <div class="device-card \${cardModifier}">
               \${isAt80 ? '<div class="alert-80-badge">🔔 80% Reached — Unplug Ready</div>' : ''}
               <div class="card-top">
                 <div class="device-title" title="\${d.name}">\${d.name}</div>
@@ -1111,6 +1219,7 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
               \${d.maxChargingWatts > 0 ? '<div class="ceiling-tag">⚡ Hardware Limit: ' + Math.round(d.maxChargingWatts) + 'W</div>' : ''}
               <div class="watts-display \${isChg ? '' : 'idle'}">\${wText}</div>
               <div class="elec-specs">\${Math.round(d.currentMA)} mA • \${d.voltageV.toFixed(2)} V</div>
+              \${etaText ? '<div class="eta-line">' + etaText + '</div>' : ''}
               
               <div class="chart-container"><canvas id="cvs_\${d.id}"></canvas></div>
 
@@ -1168,7 +1277,7 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
   }
 
   // ─────────────────────────────────────────────────────────────
-  // FLUTTER UI: MOBILE & DESKTOP SWITCHER (WITH CLEAN POPUP MENU)
+  // FLUTTER UI: MOBILE & DESKTOP SWITCHER
   // ─────────────────────────────────────────────────────────────
 
   @override
@@ -1579,9 +1688,9 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
                             side: const BorderSide(color: Color(0xFF22BFA2)),
                             shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
                           ),
-                          icon: const Icon(Icons.copy, size: 16),
-                          label: const Text('Copy Hub Link'),
-                          onPressed: _copyLink,
+                          icon: const Icon(Icons.share, size: 16),
+                          label: const Text('Share / View Hub Details'),
+                          onPressed: _showHubShareDialog,
                         ),
                       ],
                     ],
@@ -1675,7 +1784,7 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
                 if (val == 'toggle_sound') {
                   setState(() => enable80AlertSound = !enable80AlertSound);
                 }
-                if (val == 'copy_link') _copyLink();
+                if (val == 'share_hub') _showHubShareDialog();
               },
               itemBuilder: (context) => [
                 const PopupMenuItem(
@@ -1695,8 +1804,8 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
                   ]),
                 ),
                 const PopupMenuItem(
-                  value: 'copy_link',
-                  child: Row(children: [Icon(Icons.link, color: Color(0xFF22BFA2), size: 18), SizedBox(width: 10), Text('Copy Web Link')]),
+                  value: 'share_hub',
+                  child: Row(children: [Icon(Icons.share, color: Color(0xFF22BFA2), size: 18), SizedBox(width: 10), Text('Hub Details')]),
                 ),
               ],
             ),
@@ -1722,9 +1831,9 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
               },
             ),
             IconButton(
-              icon: const Icon(Icons.link, color: Color(0xFF22BFA2)),
-              tooltip: 'Copy Web Link ($broadcastUrl)',
-              onPressed: _copyLink,
+              icon: const Icon(Icons.share, color: Color(0xFF22BFA2)),
+              tooltip: 'Share / View Hub Details',
+              onPressed: _showHubShareDialog,
             ),
           ],
           Padding(
@@ -1824,6 +1933,22 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
     );
   }
 
+  // Calculate dynamic ETA to 80% or 100%
+  String _calculateEta(int bat, double watts) {
+    if (watts < 1.0) return '';
+    const capWh = 19.25; // standard ~5,000mAh battery
+    if (bat < 80) {
+      final remWh = ((80 - bat) / 100) * capWh;
+      final mins = ((remWh / watts) * 60).round();
+      return mins > 0 ? '⏱️ Est. to 80%: ~$mins min' : '⏱️ Nearing 80%';
+    } else if (bat < 100) {
+      final remWh = ((100 - bat) / 100) * capWh;
+      final mins = ((remWh / (watts.clamp(1.0, 4.0))) * 60).round();
+      return mins > 0 ? '⏱️ Est. to 100%: ~$mins min' : '⏱️ Trickle charging';
+    }
+    return '🔋 Battery Full';
+  }
+
   Widget _buildNativeDeviceCard(Map<String, dynamic> d, List<double> history) {
     final double watts = (d['watts'] as num?)?.toDouble() ?? 0.0;
     final rawChg = d['isCharging'];
@@ -1832,20 +1957,31 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
     final double temp = (d['tempC'] as num?)?.toDouble() ?? 0.0;
     final double maxW = (d['maxChargingWatts'] as num?)?.toDouble() ?? 0.0;
     final bool isAt80 = bat >= 80 && isChg;
+    final bool isLow = bat < 20;
     final String deviceId = d['id']?.toString() ?? '';
     final bool isMuted = _mutedDevices[deviceId] == true;
 
+    // Adaptive Card Colors
+    Color borderColor;
+    if (isAt80) {
+      borderColor = const Color(0xFFF5B544).withOpacity(0.6); // Amber
+    } else if (isLow) {
+      borderColor = const Color(0xFFEF6464).withOpacity(0.5); // Crimson
+    } else if (isChg) {
+      borderColor = const Color(0xFF22BFA2).withOpacity(0.45); // Electric Teal
+    } else {
+      borderColor = Colors.white10;
+    }
+
     final tempColor = temp > 40 ? const Color(0xFFEF6464) : (temp > 36 ? const Color(0xFFF5B544) : const Color(0xFF2ECC91));
+    final etaText = isChg ? _calculateEta(bat, watts) : '';
 
     return Container(
       padding: const EdgeInsets.all(18),
       decoration: BoxDecoration(
         color: const Color(0xFF161D23),
         borderRadius: BorderRadius.circular(20),
-        border: Border.all(
-          color: isChg ? const Color(0xFF22BFA2).withOpacity(0.4) : Colors.white10,
-          width: 1.5,
-        ),
+        border: Border.all(color: borderColor, width: 1.5),
         boxShadow: const [
           BoxShadow(color: Colors.black26, blurRadius: 10, offset: Offset(0, 4)),
         ],
@@ -1963,7 +2099,21 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
               ),
             ],
           ),
-          const SizedBox(height: 8),
+
+          // Dynamic Live ETA Countdown Line
+          if (etaText.isNotEmpty) ...[
+            const SizedBox(height: 2),
+            Text(
+              etaText,
+              style: const TextStyle(
+                fontSize: 11.5,
+                color: Color(0xFF3DDDB5),
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ],
+
+          const SizedBox(height: 6),
           Expanded(
             child: ClipRRect(
               borderRadius: BorderRadius.circular(8),
@@ -1985,9 +2135,20 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
                   decoration: BoxDecoration(color: Colors.black26, borderRadius: BorderRadius.circular(8)),
                   child: Row(
                     children: [
-                      const Icon(Icons.battery_std, size: 16, color: Color(0xFFA7B0B9)),
+                      Icon(
+                        Icons.battery_std,
+                        size: 16,
+                        color: isLow ? const Color(0xFFEF6464) : const Color(0xFFA7B0B9),
+                      ),
                       const SizedBox(width: 4),
-                      Text('$bat%', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
+                      Text(
+                        '$bat%',
+                        style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          fontSize: 12,
+                          color: isLow ? const Color(0xFFEF6464) : Colors.white,
+                        ),
+                      ),
                     ],
                   ),
                 ),

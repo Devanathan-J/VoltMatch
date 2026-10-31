@@ -28,8 +28,9 @@ class DeviceModel {
   final bool isVerified;
   final double recommendedPower;
   final double minPower;
+  final double batteryCapacityWh; // Added for Time-To-80% / Time-To-Full calculations
   final List<PowerProfile> acceptedProfiles;
-  final List<String> modelCodes; // <-- Added from MobileModels database!
+  final List<String> modelCodes;
 
   DeviceModel({
     required this.id,
@@ -40,6 +41,7 @@ class DeviceModel {
     required this.isVerified,
     required this.recommendedPower,
     required this.minPower,
+    this.batteryCapacityWh = 19.25, // Default ~5,000 mAh @ 3.85V = 19.25 Wh
     required this.acceptedProfiles,
     this.modelCodes = const [],
   });
@@ -54,6 +56,9 @@ class DeviceModel {
       isVerified: json['isVerified'] ?? false,
       recommendedPower: (json['recommendedPower'] as num).toDouble(),
       minPower: (json['minPower'] as num).toDouble(),
+      batteryCapacityWh: json['batteryCapacityWh'] != null
+          ? (json['batteryCapacityWh'] as num).toDouble()
+          : 19.25,
       acceptedProfiles: (json['acceptedProfiles'] as List)
           .map((p) => PowerProfile.fromJson(p))
           .toList(),
@@ -72,6 +77,7 @@ class DeviceModel {
     'isVerified': isVerified,
     'recommendedPower': recommendedPower,
     'minPower': minPower,
+    'batteryCapacityWh': batteryCapacityWh,
     'acceptedProfiles': acceptedProfiles.map((p) => p.toJson()).toList(),
     'modelCodes': modelCodes,
   };
