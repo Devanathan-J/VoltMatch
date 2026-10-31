@@ -34,29 +34,33 @@ class ProbeService : Service() {
     private var failCount = 0
 
     @Volatile private var isChargerPlugged = false
-    @Volatile private var latestBatteryIntent: Intent? = null
+    @Volatile private var cachedVoltageMv = 4000
+    @Volatile private var cachedBatteryPct = 50
+    @Volatile private var cachedTempC = 30.0
 
     private val deviceName = "${Build.MANUFACTURER.replaceFirstChar { it.uppercase() }} ${Build.MODEL}"
+    private val batteryManager by lazy { getSystemService(Context.BATTERY_SERVICE) as BatteryManager }
 
-    // Dedicated Power & Battery Receiver
+    // Efficient Hardware Receiver: Updates battery state on-event, avoiding 400ms poll registrations!
     private val batteryReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (intent == null) return
-            latestBatteryIntent = intent
-
             when (intent.action) {
-                Intent.ACTION_POWER_CONNECTED -> {
-                    isChargerPlugged = true
-                }
-                Intent.ACTION_POWER_DISCONNECTED -> {
-                    isChargerPlugged = false
-                }
+                Intent.ACTION_POWER_CONNECTED -> isChargerPlugged = true
+                Intent.ACTION_POWER_DISCONNECTED -> isChargerPlugged = false
                 Intent.ACTION_BATTERY_CHANGED -> {
                     val plugged = intent.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0)
                     val status = intent.getIntExtra(BatteryManager.EXTRA_STATUS, -1)
                     isChargerPlugged = plugged > 0 ||
                                        status == BatteryManager.BATTERY_STATUS_CHARGING ||
                                        status == BatteryManager.BATTERY_STATUS_FULL
+
+                    cachedVoltageMv = intent.getIntExtra(BatteryManager.EXTRA_VOLTAGE, 4000)
+                    val level = intent.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
+                    val scale = intent.getIntExtra(BatteryManager.EXTRA_SCALE, -1)
+                    if (level >= 0 && scale > 0) cachedBatteryPct = (level * 100 / scale)
+                    val rawTemp = intent.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, 0)
+                    cachedTempC = rawTemp / 10.0
                 }
             }
         }
@@ -76,12 +80,16 @@ class ProbeService : Service() {
         }
         val stickyIntent = applicationContext.registerReceiver(batteryReceiver, filter)
         if (stickyIntent != null) {
-            latestBatteryIntent = stickyIntent
             val plugged = stickyIntent.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0)
             val status = stickyIntent.getIntExtra(BatteryManager.EXTRA_STATUS, -1)
             isChargerPlugged = plugged > 0 ||
                                status == BatteryManager.BATTERY_STATUS_CHARGING ||
                                status == BatteryManager.BATTERY_STATUS_FULL
+            cachedVoltageMv = stickyIntent.getIntExtra(BatteryManager.EXTRA_VOLTAGE, 4000)
+            val level = stickyIntent.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
+            val scale = stickyIntent.getIntExtra(BatteryManager.EXTRA_SCALE, -1)
+            if (level >= 0 && scale > 0) cachedBatteryPct = (level * 100 / scale)
+            cachedTempC = stickyIntent.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, 0) / 10.0
         }
 
         startForeground(NOTIFICATION_ID, buildNotification("Initializing Probe..."))
@@ -105,39 +113,35 @@ class ProbeService : Service() {
                 val hasWifi = localIp != null && localIp.contains(".")
                 val hasPower = isChargerPlugged
 
-                // STATE 1: No Wi-Fi
                 if (!hasWifi) {
                     targetHubIp = null
                     updateNotification("⚠️ Waiting for Wi-Fi connection...")
+                    delay(1200)
+                    continue
+                }
+
+                if (!hasPower) {
+                    targetHubIp = null
+                    updateNotification("🔌 Connect charger to start streaming")
                     delay(1000)
                     continue
                 }
 
-                // STATE 2: Wi-Fi on, but Charger unplugged
-                if (!hasPower) {
-                    targetHubIp = null
-                    updateNotification("🔌 Connect charger to start streaming")
-                    delay(800)
-                    continue
-                }
-
-                // STATE 3: Verify if current targetHubIp is still alive, otherwise clear and rediscover
+                // Verify hub is alive before streaming
                 if (targetHubIp != null && !pingHub(targetHubIp!!)) {
                     targetHubIp = null
                 }
 
-                // STATE 4: Discover Hub if we don't have a live IP
                 if (targetHubIp == null) {
                     updateNotification("Searching for Central Hub...")
                     discoverHub()
                     if (targetHubIp == null) {
                         updateNotification("No Central Hub available")
-                        delay(2000)
+                        delay(2500)
                         continue
                     }
                 }
 
-                // STATE 5: Actively Stream to Verified Live Hub
                 val ip = targetHubIp ?: continue
                 val payload = sampleBatteryTelemetry()
                 val watts = payload.optDouble("watts", 0.0)
@@ -167,9 +171,9 @@ class ProbeService : Service() {
         isDiscovering = true
 
         withContext(Dispatchers.IO) {
-            // 1. Fast UDP listener (1.2s timeout)
+            // 1. Fast UDP listener
             try {
-                val socket = DatagramSocket(8082).apply { soTimeout = 1200 }
+                val socket = DatagramSocket(8082).apply { soTimeout = 1000 }
                 val buf = ByteArray(1024)
                 val packet = DatagramPacket(buf, buf.size)
                 socket.receive(packet)
@@ -185,19 +189,18 @@ class ProbeService : Service() {
                     }
                 }
                 socket.close()
-            } catch (e: Exception) {}
+            } catch (_: Exception) {}
 
-            // 2. Parallel Subnet scan fallback
+            // 2. Gentle staggered subnet scan (batches of 25 to avoid radio overload)
             val localIp = getLocalIpAddress()
             if (localIp != null && localIp.contains(".")) {
                 val subnet = localIp.substringBeforeLast(".")
-                for (chunkStart in 1..254 step 30) {
+                for (chunkStart in 1..254 step 25) {
                     if (targetHubIp != null) break
                     coroutineScope {
-                        for (i in chunkStart until minOf(chunkStart + 30, 255)) {
+                        for (i in chunkStart until minOf(chunkStart + 25, 255)) {
                             val testIp = "$subnet.$i"
                             if (testIp == localIp) continue
-
                             launch {
                                 if (pingHub(testIp)) {
                                     targetHubIp = testIp
@@ -215,39 +218,21 @@ class ProbeService : Service() {
         return try {
             val url = URL("http://$ip:8080/api/discover")
             val conn = (url.openConnection() as HttpURLConnection).apply {
-                connectTimeout = 300
-                readTimeout = 300
+                connectTimeout = 250
+                readTimeout = 250
             }
             val ok = conn.responseCode == 200
             conn.disconnect()
             ok
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             false
         }
     }
 
     private fun sampleBatteryTelemetry(): JSONObject {
-        val batteryStatus = latestBatteryIntent
         val rawCurrent = abs(batteryManager.getIntProperty(BatteryManager.BATTERY_PROPERTY_CURRENT_NOW))
         val currentInMA = if (rawCurrent > 10000) rawCurrent / 1000.0 else rawCurrent.toDouble()
-
-        val voltageMv = batteryStatus?.getIntExtra(BatteryManager.EXTRA_VOLTAGE, -1) ?: 0
-        val voltageInV = voltageMv / 1000.0
-
-        val level = batteryStatus?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
-        val scale = batteryStatus?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: -1
-        val batteryPct = if (level >= 0 && scale > 0) (level * 100 / scale) else 0
-
-        val rawTemp = batteryStatus?.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, 0) ?: 0
-        val tempC = rawTemp / 10.0
-
-        val maxCurrentUa = batteryStatus?.getIntExtra("max_charging_current", -1) ?: -1
-        val maxVoltageUv = batteryStatus?.getIntExtra("max_charging_voltage", -1) ?: -1
-        var maxWatts = 0.0
-        if (maxCurrentUa > 0 && maxVoltageUv > 0) {
-            maxWatts = (maxVoltageUv / 1000000.0) * (maxCurrentUa / 1000000.0)
-        }
-
+        val voltageInV = cachedVoltageMv / 1000.0
         val liveWatts = if (isChargerPlugged) voltageInV * (currentInMA / 1000.0) else 0.0
 
         return JSONObject().apply {
@@ -256,14 +241,11 @@ class ProbeService : Service() {
             put("watts", liveWatts)
             put("currentMA", currentInMA)
             put("voltageV", voltageInV)
-            put("batteryPct", batteryPct)
-            put("tempC", tempC)
-            put("maxChargingWatts", maxWatts)
+            put("batteryPct", cachedBatteryPct)
+            put("tempC", cachedTempC)
             put("isCharging", isChargerPlugged)
         }
     }
-
-    private val batteryManager by lazy { getSystemService(Context.BATTERY_SERVICE) as BatteryManager }
 
     private fun sendTelemetry(hubIp: String, json: JSONObject): Boolean {
         var conn: HttpURLConnection? = null
@@ -279,7 +261,6 @@ class ProbeService : Service() {
                 connectTimeout = 1000
                 readTimeout = 1000
                 setRequestProperty("Content-Type", "application/json; charset=utf-8")
-                setRequestProperty("Accept", "application/json")
                 setFixedLengthStreamingMode(jsonBytes.size)
             }
 
@@ -295,12 +276,10 @@ class ProbeService : Service() {
             } else {
                 false
             }
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             false
         } finally {
-            try {
-                conn?.disconnect()
-            } catch (e: Exception) {}
+            try { conn?.disconnect() } catch (_: Exception) {}
         }
     }
 
@@ -348,14 +327,9 @@ class ProbeService : Service() {
     override fun onDestroy() {
         isRunning = false
         serviceScope.cancel()
-
-        try {
-            applicationContext.unregisterReceiver(batteryReceiver)
-        } catch (e: Exception) {}
-
+        try { applicationContext.unregisterReceiver(batteryReceiver) } catch (_: Exception) {}
         if (wakeLock?.isHeld == true) wakeLock?.release()
         if (wifiLock?.isHeld == true) wifiLock?.release()
-
         VoltMatchTileService.refreshTile(this)
         super.onDestroy()
     }

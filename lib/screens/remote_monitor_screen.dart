@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -43,8 +44,6 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
 
   final Map<String, Map<String, dynamic>> _connectedDevices = {};
   final Map<String, List<double>> _deviceHistories = {};
-
-  // Per-Device Mute Tracking (device_id -> isMuted)
   final Map<String, bool> _mutedDevices = {};
 
   final Set<String> _notified80Devices = {};
@@ -102,15 +101,14 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
         final name = iface.name.toLowerCase();
         if (_isVirtualInterface(name)) continue;
         for (final addr in iface.addresses) {
-          if (addr.type != InternetAddressType.IPv4) continue;
-          if (addr.isLoopback) continue;
+          if (addr.type != InternetAddressType.IPv4 || addr.isLoopback) continue;
           final ip = addr.address;
           if (ip == '0.0.0.0' || ip.startsWith('169.254.')) continue;
 
           int score = 0;
-          if (name.contains('wi-fi') || name.contains('wifi') || name.contains('wlan') || name.contains('wireless')) {
+          if (name.contains('wi-fi') || name.contains('wifi') || name.contains('wlan')) {
             score += 100;
-          } else if (name.contains('ethernet') || name.contains('eth')) {
+          } else if (name.contains('eth') || name.contains('lan')) {
             score += 90;
           } else {
             score += 10;
@@ -121,13 +119,7 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
 
       if (candidates.isNotEmpty) {
         candidates.sort((a, b) => b.value.compareTo(a.value));
-        if (mounted) {
-          setState(() {
-            cachedLocalIp = candidates.first.key;
-          });
-        } else {
-          cachedLocalIp = candidates.first.key;
-        }
+        if (mounted) setState(() => cachedLocalIp = candidates.first.key);
         return;
       }
     } catch (_) {}
@@ -136,13 +128,7 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
       for (var iface in await NetworkInterface.list()) {
         for (var addr in iface.addresses) {
           if (addr.type == InternetAddressType.IPv4 && !addr.isLoopback) {
-            if (mounted) {
-              setState(() {
-                cachedLocalIp = addr.address;
-              });
-            } else {
-              cachedLocalIp = addr.address;
-            }
+            if (mounted) setState(() => cachedLocalIp = addr.address);
             return;
           }
         }
@@ -162,23 +148,20 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
   }
 
   // ─────────────────────────────────────────────────────────────
-  // REAL-TIME AUTO-DISCOVERY & ZOMBIE CLEANUP ENGINE
+  // AUTO-DISCOVERY RADAR
   // ─────────────────────────────────────────────────────────────
 
   void _startRealtimeAutoDiscovery() {
     if (isRunning) return;
-    setState(() {
-      isSearchingForHub = true;
-    });
+    setState(() => isSearchingForHub = true);
 
     _startUdpListener();
     _scanSubnetOnce();
 
     _realtimeRadarTimer?.cancel();
-    _realtimeRadarTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+    _realtimeRadarTimer = Timer.periodic(const Duration(seconds: 2), (_) {
       if (!isRunning && !isHostMode && mounted) {
         _verifyAndPruneHubs();
-        _scanSubnetOnce();
       }
     });
   }
@@ -219,12 +202,12 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
     if (parts.length != 4) return;
     final subnet = '${parts[0]}.${parts[1]}.${parts[2]}';
 
-    final client = HttpClient()..connectionTimeout = const Duration(milliseconds: 350);
+    final client = HttpClient()..connectionTimeout = const Duration(milliseconds: 250);
 
-    for (int i = 1; i <= 254; i += 50) {
+    for (int i = 1; i <= 254; i += 30) {
       if (!mounted || isRunning) break;
       final futures = <Future>[];
-      for (int j = i; j < i + 50 && j <= 254; j++) {
+      for (int j = i; j < i + 30 && j <= 254; j++) {
         final target = '$subnet.$j';
         if (target == cachedLocalIp) continue;
 
@@ -247,9 +230,7 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
     client.close(force: true);
 
     if (mounted && !isRunning) {
-      setState(() {
-        isSearchingForHub = false;
-      });
+      setState(() => isSearchingForHub = false);
     }
   }
 
@@ -280,7 +261,7 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
     final now = DateTime.now().millisecondsSinceEpoch;
 
     setState(() {
-      discoveredHubs.removeWhere((h) => (now - (h['lastSeen'] as int)) > 2000);
+      discoveredHubs.removeWhere((h) => (now - (h['lastSeen'] as int)) > 3000);
 
       if (discoveredHubs.isEmpty) {
         discoveredHubIp = null;
@@ -307,7 +288,7 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
   }
 
   // ─────────────────────────────────────────────────────────────
-  // SOUND & NOTIFICATION ENGINE (DESKTOP + ANDROID CENTRAL HUB)
+  // AUDIO & NOTIFICATION ENGINE
   // ─────────────────────────────────────────────────────────────
 
   void _playAlertChime() {
@@ -379,6 +360,7 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
   void _testAlertSound() {
     _playAlertChime();
     _showWindowsNotification('Test Device', 80);
+    ScaffoldMessenger.of(context).clearSnackBars();
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(
         content: Text('🔔 Testing Chime & Notification...'),
@@ -408,7 +390,6 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
 
       if (bat >= 80 && isPlugged) {
         anyDeviceNeedsSound = true;
-
         if (!_notified80Devices.contains(id)) {
           _notified80Devices.add(id);
           _showWindowsNotification(name, bat);
@@ -441,21 +422,15 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
           SnackBar(
             content: Text('📥 Exported log to: ${file.path}'),
             backgroundColor: const Color(0xFF22BFA2),
-            duration: const Duration(seconds: 4),
+            duration: const Duration(seconds: 3),
           ),
         );
       }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Could not export CSV')),
-        );
-      }
-    }
+    } catch (_) {}
   }
 
   // ─────────────────────────────────────────────────────────────
-  // TELEMETRY SAMPLING
+  // TELEMETRY SAMPLING & IMMUTABLE GRAPH HISTORY
   // ─────────────────────────────────────────────────────────────
 
   Future<void> _fetchSelfStats() async {
@@ -504,18 +479,19 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
   void _recordDeviceTelemetry(String id, Map<String, dynamic> data) {
     _connectedDevices[id] = data;
 
-    if (!_deviceHistories.containsKey(id)) {
-      _deviceHistories[id] = List.filled(25, 0.0);
-    }
+    // FIX: Generate a NEW List instance every tick so Flutter's CustomPainter always repaints!
+    final previousHistory = _deviceHistories[id] ?? List.filled(25, 0.0);
     final watts = (data['watts'] as num?)?.toDouble() ?? 0.0;
-    _deviceHistories[id]!.add(watts);
-    if (_deviceHistories[id]!.length > 25) {
-      _deviceHistories[id]!.removeAt(0);
+
+    final updatedHistory = List<double>.from(previousHistory)..add(watts);
+    if (updatedHistory.length > 25) {
+      updatedHistory.removeAt(0);
     }
+    _deviceHistories[id] = updatedHistory;
 
     final now = DateTime.now();
     _csvLog.add('${now.toIso8601String()},${data["name"]},${data["watts"]},${data["currentMA"]},${data["voltageV"]},${data["batteryPct"]},${data["tempC"]},${data["isCharging"]}');
-    if (_csvLog.length > 5000) _csvLog.removeAt(1);
+    if (_csvLog.length > 3000) _csvLog.removeAt(1);
   }
 
   Future<void> _ensureWindowsFirewall() async {
@@ -534,7 +510,7 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
       _udpBeaconSocket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
       _udpBeaconSocket?.broadcastEnabled = true;
 
-      _beaconTimer = Timer.periodic(const Duration(milliseconds: 500), (_) {
+      _beaconTimer = Timer.periodic(const Duration(milliseconds: 600), (_) {
         if (!isRunning || !isHostMode) return;
         final effectiveName = nicknameController.text.trim().isNotEmpty
             ? nicknameController.text.trim()
@@ -591,7 +567,6 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
       req.response.headers.add('Access-Control-Allow-Origin', '*');
       req.response.headers.add('Access-Control-Allow-Headers', '*');
       req.response.headers.add('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-      // Offline-first PWA caching header: loads instantly without external internet!
       req.response.headers.add('Cache-Control', 'no-cache');
 
       if (req.method == 'OPTIONS') {
@@ -627,11 +602,7 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
           final body = await utf8.decoder.bind(req).join();
           final data = json.decode(body) as Map<String, dynamic>;
           final enabled = data['enabled'] as bool;
-          if (mounted) {
-            setState(() {
-              enable80AlertSound = enabled;
-            });
-          }
+          if (mounted) setState(() => enable80AlertSound = enabled);
           req.response
             ..statusCode = HttpStatus.ok
             ..headers.contentType = ContentType.json
@@ -672,7 +643,6 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
   }
 
   // START: Probe
-  // START: Probe with Live Health Check & Spam-Proof Auto-Healing
   Future<void> _startProbe() async {
     _stopDiscovery();
 
@@ -694,9 +664,7 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
       final client = HttpClient()..connectionTimeout = const Duration(seconds: 1);
       final req = await client.getUrl(Uri.parse('http://$targetIp:8080/api/discover'));
       final res = await req.close();
-      if (res.statusCode == HttpStatus.ok) {
-        isHubOnline = true;
-      }
+      if (res.statusCode == HttpStatus.ok) isHubOnline = true;
       client.close(force: true);
     } catch (_) {}
 
@@ -726,7 +694,7 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
 
     final selfId = 'probe_${Platform.operatingSystem}_${cachedLocalIp.replaceAll('.', '_')}';
     int consecutiveSendFailures = 0;
-    bool isHandlingDisconnect = false; // Prevents the SnackBar loop!
+    bool isHandlingDisconnect = false;
 
     _fastTimer?.cancel();
     _fastTimer = Timer.periodic(const Duration(milliseconds: 400), (_) async {
@@ -758,11 +726,11 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
       } catch (_) {
         consecutiveSendFailures++;
         if (consecutiveSendFailures >= 3 && !isHandlingDisconnect) {
-          isHandlingDisconnect = true; // Lock immediately!
-          _fastTimer?.cancel(); // Kill timer immediately!
+          isHandlingDisconnect = true;
+          _fastTimer?.cancel();
 
           if (mounted) {
-            ScaffoldMessenger.of(context).clearSnackBars(); // Wipe queue!
+            ScaffoldMessenger.of(context).clearSnackBars();
             ScaffoldMessenger.of(context).showSnackBar(
               const SnackBar(
                 content: Text('Hub disconnected! Returning to radar scan...'),
@@ -818,7 +786,6 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
     );
   }
 
-  // Show Quick Connection Modal
   void _showHubShareDialog() {
     showDialog(
       context: context,
@@ -864,7 +831,7 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
             ),
             const SizedBox(height: 12),
             const Text(
-              'Port: 8080 (Dashboard) • Port: 8082 (Auto-Discovery UDP)',
+              'Port: 8080 (Dashboard) • Port: 8082 (UDP Discovery)',
               style: TextStyle(fontSize: 11, color: Colors.grey),
             ),
           ],
@@ -887,6 +854,10 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
       ),
     );
   }
+
+  // ─────────────────────────────────────────────────────────────
+  // WEB DASHBOARD HTML (FIXED IN-PLACE CANVAS UPDATES)
+  // ─────────────────────────────────────────────────────────────
 
   String _generateMultiDeviceHtmlDashboard() {
     return '''
@@ -938,7 +909,6 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
       border-radius: 20px;
       font-size: 13px;
       font-weight: 600;
-      transition: all 0.3s ease;
     }
     .sound-btn {
       background: rgba(255,255,255,0.06);
@@ -949,7 +919,6 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
       font-size: 12px;
       font-weight: 600;
       cursor: pointer;
-      transition: all 0.2s ease;
     }
     .grid {
       width: 100%;
@@ -968,28 +937,30 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
       flex-direction: column;
       position: relative;
       box-shadow: 0 10px 30px rgba(0,0,0,0.4);
+      transition: border-color 0.3s ease;
     }
-    .device-card.charging { border-color: rgba(34,191,162,0.35); }
-    .device-card.low-bat { border-color: rgba(239,100,100,0.4); }
-    .device-card.at-80 { border-color: rgba(245,181,68,0.5); }
+    .device-card.charging { border-color: rgba(34,191,162,0.45); }
+    .device-card.low-bat { border-color: rgba(239,100,100,0.5); }
+    .device-card.at-80 { border-color: rgba(245,181,68,0.6); }
     .card-top { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 12px; }
     .device-title { font-size: 16px; font-weight: 700; color: #fff; max-width: 70%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .device-status { font-size: 11px; font-weight: 700; padding: 4px 10px; border-radius: 12px; text-transform: uppercase; }
     .status-charging { background: rgba(46,204,145,0.15); color: #2ECC91; }
     .status-idle { background: rgba(255,255,255,0.08); color: var(--subtext); }
     .ceiling-tag { font-size: 11px; color: var(--accent-bright); font-weight: 600; margin-bottom: 2px; }
-    .watts-display { font-size: 46px; font-weight: 800; color: var(--accent); letter-spacing: -1px; line-height: 1; margin: 6px 0; }
+    .watts-display { font-size: 44px; font-weight: 800; color: var(--accent); letter-spacing: -1px; line-height: 1; margin: 6px 0; }
     .watts-display.idle { color: var(--subtext); }
-    .elec-specs { font-size: 13px; color: var(--subtext); margin-bottom: 8px; }
-    .eta-line { font-size: 12px; color: #3DDDB5; font-weight: 600; margin-bottom: 12px; }
+    .elec-specs { font-size: 13px; color: var(--subtext); margin-bottom: 6px; }
+    .eta-line { font-size: 12px; color: #3DDDB5; font-weight: 600; margin-bottom: 10px; }
     .chart-container {
       width: 100%;
-      height: 65px;
-      background: rgba(0,0,0,0.25);
+      height: 75px;
+      background: rgba(0,0,0,0.28);
       border-radius: 10px;
       overflow: hidden;
       margin-bottom: 14px;
-      border: 1px solid rgba(255,255,255,0.03);
+      border: 1px solid rgba(255,255,255,0.04);
+      position: relative;
     }
     canvas { width: 100%; height: 100%; display: block; }
     .stats-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: auto; }
@@ -1108,7 +1079,7 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
 
     function calculateEta(bat, watts) {
       if (!watts || watts < 1.0) return '';
-      const capWh = 19.25; // standard ~5000mAh smartphone battery
+      const capWh = 19.25;
       if (bat < 80) {
         const remWh = ((80 - bat) / 100) * capWh;
         const mins = Math.round((remWh / watts) * 60);
@@ -1121,31 +1092,82 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
       return '🔋 Battery Full';
     }
 
-    function drawSparkline(canvasId, historyData) {
+    // Modern High-Tech Oscilloscope Canvas Renderer with Glow & Gradient
+    function drawSparkline(canvasId, historyData, isChg, currentWatts) {
       const cvs = document.getElementById(canvasId);
       if (!cvs) return;
       const ctx = cvs.getContext('2d');
-      const w = cvs.width = cvs.offsetWidth;
-      const h = cvs.height = cvs.offsetHeight;
+      const w = cvs.width = cvs.offsetWidth || 300;
+      const h = cvs.height = cvs.offsetHeight || 75;
       ctx.clearRect(0, 0, w, h);
 
-      const maxVal = Math.max(20, ...historyData) * 1.15;
-      ctx.strokeStyle = '#22BFA2';
-      ctx.lineWidth = 2.2;
+      if (!historyData || historyData.length === 0) return;
+
+      let maxVal = 5.0;
+      for (let i = 0; i < historyData.length; i++) {
+        if (historyData[i] > maxVal) maxVal = historyData[i];
+      }
+      maxVal *= 1.15; // 15% headroom
+
+      const stepX = w / (historyData.length - 1);
+      const scaleY = (h - 14) / maxVal;
+
+      // 1. Draw glowing gradient fill under curve
+      const grad = ctx.createLinearGradient(0, 0, 0, h);
+      grad.addColorStop(0, isChg ? 'rgba(34,191,162,0.32)' : 'rgba(167,176,185,0.15)');
+      grad.addColorStop(1, 'rgba(0,0,0,0)');
+
       ctx.beginPath();
       for (let i = 0; i < historyData.length; i++) {
-        const x = (i / (historyData.length - 1)) * w;
-        const y = h - ((historyData[i] / maxVal) * (h - 8)) - 4;
+        const x = i * stepX;
+        const y = h - (historyData[i] * scaleY) - 6;
+        if (i === 0) {
+          ctx.moveTo(x, h);
+          ctx.lineTo(x, y);
+        } else {
+          ctx.lineTo(x, y);
+        }
+      }
+      ctx.lineTo(w, h);
+      ctx.closePath();
+      ctx.fillStyle = grad;
+      ctx.fill();
+
+      // 2. Draw crisp stroke line
+      ctx.beginPath();
+      for (let i = 0; i < historyData.length; i++) {
+        const x = i * stepX;
+        const y = h - (historyData[i] * scaleY) - 6;
         if (i === 0) ctx.moveTo(x, y);
         else ctx.lineTo(x, y);
       }
+      ctx.strokeStyle = isChg ? '#22BFA2' : '#A7B0B9';
+      ctx.lineWidth = 2.2;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
       ctx.stroke();
+
+      // 3. Draw live pulsing beacon dot at the head
+      if (isChg && currentWatts > 0.2) {
+        const lastX = w - 4;
+        const lastY = h - (historyData[historyData.length - 1] * scaleY) - 6;
+
+        ctx.beginPath();
+        ctx.arc(lastX, lastY, 5, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(61,221,181,0.4)';
+        ctx.fill();
+
+        ctx.beginPath();
+        ctx.arc(lastX, lastY, 2.5, 0, Math.PI * 2);
+        ctx.fillStyle = '#3DDDB5';
+        ctx.fill();
+      }
     }
 
     async function pollHub() {
       try {
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 2500);
+        const timeoutId = setTimeout(() => controller.abort(), 2000);
         const res = await fetch('/api/stats', { signal: controller.signal });
         clearTimeout(timeoutId);
 
@@ -1192,60 +1214,107 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
           lastTingTime = 0;
         }
 
-        let html = '';
+        // Render cards only if device count or IDs changed, otherwise update values in-place!
+        const existingCards = document.querySelectorAll('.device-card');
+        if (existingCards.length !== devices.length) {
+          let html = '';
+          devices.forEach((d) => {
+            html += `
+              <div class="device-card" id="card_\${d.id}">
+                <div class="alert-80-badge" id="badge80_\${d.id}" style="display:none;">🔔 80% Reached — Unplug Ready</div>
+                <div class="card-top">
+                  <div class="device-title" id="title_\${d.id}">\${d.name}</div>
+                  <div class="device-status" id="status_\${d.id}"></div>
+                </div>
+                <div class="ceiling-tag" id="ceiling_\${d.id}"></div>
+                <div class="watts-display" id="watts_\${d.id}">0.0 W</div>
+                <div class="elec-specs" id="specs_\${d.id}"></div>
+                <div class="eta-line" id="eta_\${d.id}"></div>
+                <div class="chart-container"><canvas id="cvs_\${d.id}"></canvas></div>
+                <div class="stats-row">
+                  <div class="pill">
+                    <div class="pill-label">Battery Level</div>
+                    <div class="pill-val" id="bat_\${d.id}">--%</div>
+                  </div>
+                  <div class="pill">
+                    <div class="pill-label">Temperature</div>
+                    <div class="pill-val" id="temp_\${d.id}">-- °C</div>
+                  </div>
+                </div>
+              </div>
+            `;
+          });
+          grid.innerHTML = html;
+        }
+
+        // Update live data into cards without destroying DOM elements!
         devices.forEach((d) => {
           const w = d.watts || 0;
           const isChg = (d.isCharging === true || w > 0.3);
-          const wText = isChg ? d.watts.toFixed(1) + ' W' : '0.0 W';
-          const statusCls = isChg ? 'status-charging' : 'status-idle';
-          const statusText = isChg ? '⚡ Charging' : 'Unplugged';
-          const tempColor = d.tempC > 40 ? '#EF6464' : (d.tempC > 36 ? '#F5B544' : '#2ECC91');
           const isAt80 = d.batteryPct >= 80 && isChg;
           const isLow = d.batteryPct < 20;
-          const etaText = isChg ? calculateEta(d.batteryPct, d.watts) : '';
 
-          let cardModifier = '';
-          if (isAt80) cardModifier = 'at-80';
-          else if (isLow) cardModifier = 'low-bat';
-          else if (isChg) cardModifier = 'charging';
-
-          html += `
-            <div class="device-card \${cardModifier}">
-              \${isAt80 ? '<div class="alert-80-badge">🔔 80% Reached — Unplug Ready</div>' : ''}
-              <div class="card-top">
-                <div class="device-title" title="\${d.name}">\${d.name}</div>
-                <div class="device-status \${statusCls}">\${statusText}</div>
-              </div>
-              \${d.maxChargingWatts > 0 ? '<div class="ceiling-tag">⚡ Hardware Limit: ' + Math.round(d.maxChargingWatts) + 'W</div>' : ''}
-              <div class="watts-display \${isChg ? '' : 'idle'}">\${wText}</div>
-              <div class="elec-specs">\${Math.round(d.currentMA)} mA • \${d.voltageV.toFixed(2)} V</div>
-              \${etaText ? '<div class="eta-line">' + etaText + '</div>' : ''}
-              
-              <div class="chart-container"><canvas id="cvs_\${d.id}"></canvas></div>
-
-              <div class="stats-row">
-                <div class="pill">
-                  <div class="pill-label">Battery Level</div>
-                  <div class="pill-val">\${d.batteryPct}%</div>
-                </div>
-                <div class="pill">
-                  <div class="pill-label">Temperature</div>
-                  <div class="pill-val" style="color: \${tempColor}">\${d.tempC.toFixed(1)} °C</div>
-                </div>
-              </div>
-            </div>
-          `;
-        });
-
-        grid.innerHTML = html;
-
-        devices.forEach((d) => {
-          if (!deviceHistories[d.id]) {
-            deviceHistories[d.id] = new Array(25).fill(0);
+          const card = document.getElementById('card_' + d.id);
+          if (card) {
+            card.className = 'device-card ' + (isAt80 ? 'at-80' : (isLow ? 'low-bat' : (isChg ? 'charging' : '')));
           }
-          deviceHistories[d.id].push(d.isCharging ? d.watts : 0);
-          deviceHistories[d.id].shift();
-          drawSparkline('cvs_' + d.id, deviceHistories[d.id]);
+
+          const b80 = document.getElementById('badge80_' + d.id);
+          if (b80) b80.style.display = isAt80 ? 'block' : 'none';
+
+          const titleEl = document.getElementById('title_' + d.id);
+          if (titleEl) titleEl.innerText = d.name;
+
+          const statusEl = document.getElementById('status_' + d.id);
+          if (statusEl) {
+            statusEl.className = 'device-status ' + (isChg ? 'status-charging' : 'status-idle');
+            statusEl.innerText = isChg ? '⚡ Charging' : 'Unplugged';
+          }
+
+          const ceilEl = document.getElementById('ceiling_' + d.id);
+          if (ceilEl) {
+            ceilEl.innerText = d.maxChargingWatts > 0 ? '⚡ Limit: ' + Math.round(d.maxChargingWatts) + 'W' : '';
+          }
+
+          const wEl = document.getElementById('watts_' + d.id);
+          if (wEl) {
+            wEl.className = 'watts-display ' + (isChg ? '' : 'idle');
+            wEl.innerText = isChg ? d.watts.toFixed(1) + ' W' : '0.0 W';
+          }
+
+          const specsEl = document.getElementById('specs_' + d.id);
+          if (specsEl) {
+            specsEl.innerText = Math.round(d.currentMA) + ' mA • ' + d.voltageV.toFixed(2) + ' V';
+          }
+
+          const etaEl = document.getElementById('eta_' + d.id);
+          if (etaEl) {
+            etaEl.innerText = isChg ? calculateEta(d.batteryPct, d.watts) : '';
+          }
+
+          const batEl = document.getElementById('bat_' + d.id);
+          if (batEl) {
+            batEl.innerText = d.batteryPct + '%';
+            batEl.style.color = isLow ? '#EF6464' : '#FFFFFF';
+          }
+
+          const tempEl = document.getElementById('temp_' + d.id);
+          if (tempEl) {
+            tempEl.innerText = d.tempC.toFixed(1) + ' °C';
+            tempEl.style.color = d.tempC > 40 ? '#EF6464' : (d.tempC > 36 ? '#F5B544' : '#2ECC91');
+          }
+
+          // Push into continuous graph history
+          if (!deviceHistories[d.id]) {
+            deviceHistories[d.id] = new Array(25).fill(0.0);
+          }
+          deviceHistories[d.id].push(isChg ? d.watts : 0.0);
+          if (deviceHistories[d.id].length > 25) {
+            deviceHistories[d.id].shift();
+          }
+
+          // Draw active glowing oscilloscope canvas!
+          drawSparkline('cvs_' + d.id, deviceHistories[d.id], isChg, d.watts);
         });
 
       } catch(e) {
@@ -1296,7 +1365,6 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
           child: ListView(
             padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
             children: [
-              // Segmented Mode Switcher (LOCKED WHILE SESSION IS RUNNING)
               Opacity(
                 opacity: isRunning ? 0.55 : 1.0,
                 child: Container(
@@ -1309,7 +1377,6 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
                   ),
                   child: Row(
                     children: [
-                      // 1. Central Hub Option
                       Expanded(
                         child: GestureDetector(
                           onTap: isRunning
@@ -1354,8 +1421,6 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
                           ),
                         ),
                       ),
-
-                      // 2. Join as Probe Option
                       Expanded(
                         child: GestureDetector(
                           onTap: isRunning
@@ -1700,7 +1765,6 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
 
               const SizedBox(height: 20),
 
-              // ACTION BUTTON
               if (!isRunning)
                 ElevatedButton.icon(
                   style: ElevatedButton.styleFrom(
@@ -1752,7 +1816,7 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
   }
 
   // ─────────────────────────────────────────────────────────────
-  // NATIVE IN-APP DASHBOARD VIEW (WITH CLEAN MOBILE POPUP MENU)
+  // NATIVE IN-APP DASHBOARD VIEW
   // ─────────────────────────────────────────────────────────────
 
   Widget _buildInAppDashboard() {
@@ -1922,7 +1986,9 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
                           final d = devices[index];
                           final id = d['id'] as String;
                           final history = _deviceHistories[id] ?? List.filled(25, 0.0);
-                          return _buildNativeDeviceCard(d, history);
+                          return RepaintBoundary(
+                            child: _buildNativeDeviceCard(d, history),
+                          );
                         },
                       );
                     },
@@ -1933,10 +1999,9 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
     );
   }
 
-  // Calculate dynamic ETA to 80% or 100%
   String _calculateEta(int bat, double watts) {
     if (watts < 1.0) return '';
-    const capWh = 19.25; // standard ~5,000mAh battery
+    const capWh = 19.25;
     if (bat < 80) {
       final remWh = ((80 - bat) / 100) * capWh;
       final mins = ((remWh / watts) * 60).round();
@@ -1961,20 +2026,22 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
     final String deviceId = d['id']?.toString() ?? '';
     final bool isMuted = _mutedDevices[deviceId] == true;
 
-    // Adaptive Card Colors
     Color borderColor;
     if (isAt80) {
-      borderColor = const Color(0xFFF5B544).withOpacity(0.6); // Amber
+      borderColor = const Color(0xFFF5B544).withOpacity(0.6);
     } else if (isLow) {
-      borderColor = const Color(0xFFEF6464).withOpacity(0.5); // Crimson
+      borderColor = const Color(0xFFEF6464).withOpacity(0.5);
     } else if (isChg) {
-      borderColor = const Color(0xFF22BFA2).withOpacity(0.45); // Electric Teal
+      borderColor = const Color(0xFF22BFA2).withOpacity(0.45);
     } else {
       borderColor = Colors.white10;
     }
 
     final tempColor = temp > 40 ? const Color(0xFFEF6464) : (temp > 36 ? const Color(0xFFF5B544) : const Color(0xFF2ECC91));
     final etaText = isChg ? _calculateEta(bat, watts) : '';
+
+    // Calculate live charger potential utilization %
+    final double utilPct = (maxW > 0) ? (watts / maxW).clamp(0.0, 1.0) : 0.0;
 
     return Container(
       padding: const EdgeInsets.all(18),
@@ -2100,20 +2167,36 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
             ],
           ),
 
-          // Dynamic Live ETA Countdown Line
-          if (etaText.isNotEmpty) ...[
-            const SizedBox(height: 2),
-            Text(
-              etaText,
-              style: const TextStyle(
-                fontSize: 11.5,
-                color: Color(0xFF3DDDB5),
-                fontWeight: FontWeight.w600,
-              ),
+          // Live ETA or Utilization Bar
+          if (etaText.isNotEmpty || maxW > 0) ...[
+            const SizedBox(height: 4),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                if (etaText.isNotEmpty)
+                  Text(
+                    etaText,
+                    style: const TextStyle(
+                      fontSize: 11,
+                      color: Color(0xFF3DDDB5),
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                if (maxW > 0 && isChg)
+                  Text(
+                    '${(utilPct * 100).round()}% capacity utilized',
+                    style: TextStyle(
+                      fontSize: 10.5,
+                      color: const Color(0xFFA7B0B9).withOpacity(0.8),
+                    ),
+                  ),
+              ],
             ),
           ],
 
           const SizedBox(height: 6),
+
+          // The Live Oscilloscope Graph Container
           Expanded(
             child: ClipRRect(
               borderRadius: BorderRadius.circular(8),
@@ -2121,7 +2204,11 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
                 color: Colors.black26,
                 width: double.infinity,
                 child: CustomPaint(
-                  painter: _SparklinePainter(history),
+                  painter: _ModernPowerOscilloscopePainter(
+                    history: history,
+                    currentWatts: watts,
+                    isCharging: isChg,
+                  ),
                 ),
               ),
             ),
@@ -2178,39 +2265,98 @@ class _RemoteMonitorScreenState extends State<RemoteMonitorScreen> {
   }
 }
 
-class _SparklinePainter extends CustomPainter {
+// ─────────────────────────────────────────────────────────────
+// MODERN HIGH-TECH POWER OSCILLOSCOPE PAINTER
+// ─────────────────────────────────────────────────────────────
+
+class _ModernPowerOscilloscopePainter extends CustomPainter {
   final List<double> history;
-  _SparklinePainter(this.history);
+  final double currentWatts;
+  final bool isCharging;
+
+  _ModernPowerOscilloscopePainter({
+    required this.history,
+    required this.currentWatts,
+    required this.isCharging,
+  });
 
   @override
   void paint(Canvas canvas, Size size) {
-    if (history.isEmpty) return;
+    if (history.isEmpty || size.width <= 0 || size.height <= 0) return;
 
-    double maxVal = 20.0;
-    for (var w in history) {
-      if (w > maxVal) maxVal = w;
+    double maxVal = 5.0;
+    for (int i = 0; i < history.length; i++) {
+      if (history[i] > maxVal) maxVal = history[i];
     }
-    maxVal *= 1.15;
+    maxVal *= 1.18; // 18% headroom
 
-    final paint = Paint()
-      ..color = const Color(0xFF22BFA2)
-      ..strokeWidth = 2.0
-      ..style = PaintingStyle.stroke;
+    final double stepX = size.width / (history.length - 1);
+    final double scaleY = (size.height - 14) / maxVal;
 
     final path = Path();
+    final fillPath = Path();
+
     for (int i = 0; i < history.length; i++) {
-      final x = (i / (history.length - 1)) * size.width;
-      final y = size.height - ((history[i] / maxVal) * (size.height - 8)) - 4;
+      final x = i * stepX;
+      final y = size.height - (history[i] * scaleY) - 6;
 
       if (i == 0) {
         path.moveTo(x, y);
+        fillPath.moveTo(x, size.height);
+        fillPath.lineTo(x, y);
       } else {
         path.lineTo(x, y);
+        fillPath.lineTo(x, y);
       }
     }
-    canvas.drawPath(path, paint);
+
+    fillPath.lineTo(size.width, size.height);
+    fillPath.close();
+
+    // 1. Draw glowing gradient fill under curve
+    final fillPaint = Paint()
+      ..shader = LinearGradient(
+        begin: Alignment.topCenter,
+        end: Alignment.bottomCenter,
+        colors: [
+          (isCharging ? const Color(0xFF22BFA2) : Colors.grey).withOpacity(0.28),
+          Colors.transparent,
+        ],
+      ).createShader(Rect.fromLTWH(0, 0, size.width, size.height))
+      ..style = PaintingStyle.fill;
+    canvas.drawPath(fillPath, fillPaint);
+
+    // 2. Draw crisp stroke line
+    final strokePaint = Paint()
+      ..color = isCharging ? const Color(0xFF22BFA2) : const Color(0xFFA7B0B9)
+      ..strokeWidth = 2.2
+      ..style = PaintingStyle.stroke
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round;
+    canvas.drawPath(path, strokePaint);
+
+    // 3. Draw live pulsing beacon dot at the head (tracks live electricity!)
+    if (isCharging && currentWatts > 0.2) {
+      final lastX = size.width - 2;
+      final lastY = size.height - (history.last * scaleY) - 6;
+
+      // Outer glow
+      canvas.drawCircle(
+        Offset(lastX, lastY),
+        5.0,
+        Paint()..color = const Color(0xFF3DDDB5).withOpacity(0.35),
+      );
+      // Center beacon
+      canvas.drawCircle(
+        Offset(lastX, lastY),
+        2.5,
+        Paint()..color = const Color(0xFF3DDDB5),
+      );
+    }
   }
 
   @override
-  bool shouldRepaint(covariant _SparklinePainter oldDelegate) => true;
+  bool shouldRepaint(covariant _ModernPowerOscilloscopePainter oldDelegate) {
+    return true; // Always repaint with live telemetry snapshots
+  }
 }

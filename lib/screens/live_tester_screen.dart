@@ -21,11 +21,11 @@ class _LiveTesterScreenState extends State<LiveTesterScreen> {
   bool isCharging = false;
   bool hasDataConnection = false;
 
-  // Windows Desktop/Laptop specific state
   bool isWindowsDesktop = false;
   bool isLaptop = true;
   int windowsBatteryPct = 100;
   double windowsWatts = 0.0;
+  bool _isPollingWindows = false;
 
   @override
   void initState() {
@@ -34,7 +34,8 @@ class _LiveTesterScreenState extends State<LiveTesterScreen> {
 
     if (isWindowsDesktop) {
       _fetchWindowsPowerStats();
-      _timer = Timer.periodic(const Duration(seconds: 3), (_) => _fetchWindowsPowerStats());
+      // Increased from 3s to 5s to eliminate laptop fan spin and CPU spikes on Windows!
+      _timer = Timer.periodic(const Duration(seconds: 5), (_) => _fetchWindowsPowerStats());
     } else {
       _fetchHardwareStats();
       _timer = Timer.periodic(const Duration(seconds: 1), (_) => _fetchHardwareStats());
@@ -47,8 +48,10 @@ class _LiveTesterScreenState extends State<LiveTesterScreen> {
     super.dispose();
   }
 
-  // Windows Laptop Battery Detection via WMI/ACPI
   Future<void> _fetchWindowsPowerStats() async {
+    if (_isPollingWindows) return;
+    _isPollingWindows = true;
+
     try {
       final res = await Process.run('powershell', [
         '-NoProfile',
@@ -94,10 +97,11 @@ class _LiveTesterScreenState extends State<LiveTesterScreen> {
           });
         }
       }
-    } catch (_) {}
+    } catch (_) {} finally {
+      _isPollingWindows = false;
+    }
   }
 
-  // Android Native Hardware Detection
   Future<void> _fetchHardwareStats() async {
     try {
       final Map<dynamic, dynamic> res = await platform.invokeMethod('getLivePowerStats');
@@ -140,77 +144,77 @@ class _LiveTesterScreenState extends State<LiveTesterScreen> {
           child: ListView(
             padding: const EdgeInsets.all(20),
             children: [
-              // Speed Gauge Card
-              Container(
-                padding: const EdgeInsets.all(24),
-                decoration: BoxDecoration(
-                  color: const Color(0xFF1C252C),
-                  borderRadius: BorderRadius.circular(20),
-                  border: Border.all(
-                    color: isCharging ? const Color(0xFF22BFA2) : Colors.white10,
-                    width: 2,
+              RepaintBoundary(
+                child: Container(
+                  padding: const EdgeInsets.all(24),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF1C252C),
+                    borderRadius: BorderRadius.circular(20),
+                    border: Border.all(
+                      color: isCharging ? const Color(0xFF22BFA2) : Colors.white10,
+                      width: 2,
+                    ),
                   ),
-                ),
-                child: Column(
-                  children: [
-                    if (isWindowsDesktop && !isLaptop) ...[
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-                        decoration: BoxDecoration(
-                          color: const Color(0xFF3DDDB5).withOpacity(0.15),
-                          borderRadius: BorderRadius.circular(12),
-                          border: Border.all(color: const Color(0xFF3DDDB5).withOpacity(0.3)),
+                  child: Column(
+                    children: [
+                      if (isWindowsDesktop && !isLaptop) ...[
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF3DDDB5).withOpacity(0.15),
+                            borderRadius: BorderRadius.circular(12),
+                            border: Border.all(color: const Color(0xFF3DDDB5).withOpacity(0.3)),
+                          ),
+                          child: const Text(
+                            '⚡ Desktop Tower (Direct AC Wall Power)',
+                            style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Color(0xFF3DDDB5)),
+                          ),
                         ),
-                        child: const Text(
-                          '⚡ Desktop Tower (Direct AC Wall Power)',
-                          style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Color(0xFF3DDDB5)),
+                        const SizedBox(height: 8),
+                      ] else if (maxWatts > 0 && isCharging) ...[
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF3DDDB5).withOpacity(0.15),
+                            borderRadius: BorderRadius.circular(12),
+                            border: Border.all(color: const Color(0xFF3DDDB5).withOpacity(0.3)),
+                          ),
+                          child: Text(
+                            '⚡ Charger Negotiated Ceiling: ${maxWatts.toStringAsFixed(0)}W',
+                            style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Color(0xFF3DDDB5)),
+                          ),
                         ),
-                      ),
-                      const SizedBox(height: 8),
-                    ] else if (maxWatts > 0 && isCharging) ...[
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-                        decoration: BoxDecoration(
-                          color: const Color(0xFF3DDDB5).withOpacity(0.15),
-                          borderRadius: BorderRadius.circular(12),
-                          border: Border.all(color: const Color(0xFF3DDDB5).withOpacity(0.3)),
-                        ),
-                        child: Text(
-                          '⚡ Charger Negotiated Ceiling: ${maxWatts.toStringAsFixed(0)}W',
-                          style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Color(0xFF3DDDB5)),
-                        ),
-                      ),
-                      const SizedBox(height: 8),
-                    ],
+                        const SizedBox(height: 8),
+                      ],
 
-                    Icon(
-                      isCharging ? Icons.bolt : Icons.power_off,
-                      size: 46,
-                      color: isCharging ? const Color(0xFF22BFA2) : Colors.grey,
-                    ),
-                    const SizedBox(height: 8),
-                    Text(
-                      isCharging
-                          ? (isWindowsDesktop && !isLaptop ? 'AC Active' : '${liveWatts.toStringAsFixed(1)} W')
-                          : 'On Battery Power',
-                      style: const TextStyle(fontSize: 42, fontWeight: FontWeight.bold, color: Colors.white),
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      isCharging
-                          ? (isWindowsDesktop && !isLaptop
-                              ? 'Desktop PC plugged directly into wall outlet'
-                              : '${currentMA.toStringAsFixed(0)} mA  •  ${voltageV.toStringAsFixed(2)} V')
-                          : 'Unplugged from charger',
-                      style: const TextStyle(color: Color(0xFFA7B0B9), fontSize: 14),
-                    ),
-                  ],
+                      Icon(
+                        isCharging ? Icons.bolt : Icons.power_off,
+                        size: 46,
+                        color: isCharging ? const Color(0xFF22BFA2) : Colors.grey,
+                      ),
+                      const SizedBox(height: 8),
+                      Text(
+                        isCharging
+                            ? (isWindowsDesktop && !isLaptop ? 'AC Active' : '${liveWatts.toStringAsFixed(1)} W')
+                            : 'On Battery Power',
+                        style: const TextStyle(fontSize: 42, fontWeight: FontWeight.bold, color: Colors.white),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        isCharging
+                            ? (isWindowsDesktop && !isLaptop
+                                ? 'Desktop PC plugged directly into wall outlet'
+                                : '${currentMA.toStringAsFixed(0)} mA  •  ${voltageV.toStringAsFixed(2)} V')
+                            : 'Unplugged from charger',
+                        style: const TextStyle(color: Color(0xFFA7B0B9), fontSize: 14),
+                      ),
+                    ],
+                  ),
                 ),
               ),
 
               const SizedBox(height: 14),
 
-              // Telemetry Specs
               if (!isWindowsDesktop) ...[
                 Row(
                   children: [
@@ -282,7 +286,6 @@ class _LiveTesterScreenState extends State<LiveTesterScreen> {
                 ),
                 const SizedBox(height: 16),
               ] else if (isLaptop) ...[
-                // Laptop Battery Level Card
                 Container(
                   padding: const EdgeInsets.all(16),
                   decoration: BoxDecoration(

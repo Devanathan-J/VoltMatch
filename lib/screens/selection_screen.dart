@@ -22,46 +22,53 @@ class _SelectionScreenState extends State<SelectionScreen> {
   String deviceSearchQuery = '';
   String chargerSearchQuery = '';
 
+  // Cache filtered results so we don't recalculate on every micro-frame
+  List<DeviceModel> _cachedDevices = [];
+  List<ChargerModel> _cachedChargers = [];
+  List<String> _cachedDeviceBrands = [];
+  List<String> _cachedChargerBrands = [];
+
   @override
   void initState() {
     super.initState();
-    if (CatalogService.devices.isNotEmpty) {
-      selectedDevice = CatalogService.devices[0];
+    _buildBrandCaches();
+    _recomputeFilteredDevices();
+    _recomputeFilteredChargers();
+
+    if (_cachedDevices.isNotEmpty) {
+      selectedDevice = _cachedDevices[0];
     }
-    if (CatalogService.chargers.isNotEmpty) {
-      selectedCharger = CatalogService.chargers[0];
+    if (_cachedChargers.isNotEmpty) {
+      selectedCharger = _cachedChargers[0];
     }
   }
 
-  List<String> get deviceBrands {
-    final brands = CatalogService.devices.map((d) => d.manufacturer).toSet().toList();
-    brands.sort();
-    return ['All Brands', ...brands];
+  void _buildBrandCaches() {
+    final dBrands = CatalogService.devices.map((d) => d.manufacturer).toSet().toList()..sort();
+    _cachedDeviceBrands = ['All Brands', ...dBrands];
+
+    final cBrands = CatalogService.chargers.map((c) => c.manufacturer).toSet().toList()..sort();
+    _cachedChargerBrands = ['All Brands', ...cBrands];
   }
 
-  List<String> get chargerBrands {
-    final brands = CatalogService.chargers.map((c) => c.manufacturer).toSet().toList();
-    brands.sort();
-    return ['All Brands', ...brands];
-  }
-
-  List<DeviceModel> get filteredDevices {
-    return CatalogService.devices.where((d) {
+  void _recomputeFilteredDevices() {
+    final query = deviceSearchQuery.trim().toLowerCase();
+    _cachedDevices = CatalogService.devices.where((d) {
       final matchesBrand = selectedDeviceBrand == 'All Brands' || d.manufacturer == selectedDeviceBrand;
-      final matchesSearch = d.name.toLowerCase().contains(deviceSearchQuery.toLowerCase());
+      final matchesSearch = query.isEmpty || d.name.toLowerCase().contains(query);
       return matchesBrand && matchesSearch;
     }).toList();
   }
 
-  List<ChargerModel> get filteredChargers {
-    return CatalogService.chargers.where((c) {
+  void _recomputeFilteredChargers() {
+    final query = chargerSearchQuery.trim().toLowerCase();
+    _cachedChargers = CatalogService.chargers.where((c) {
       final matchesBrand = selectedChargerBrand == 'All Brands' || c.manufacturer == selectedChargerBrand;
-      final matchesSearch = c.name.toLowerCase().contains(chargerSearchQuery.toLowerCase());
+      final matchesSearch = query.isEmpty || c.name.toLowerCase().contains(query);
       return matchesBrand && matchesSearch;
     }).toList();
   }
 
-  // 1-TAP HARDWARE AUTO-DETECTION ENGINE
   Future<void> _autoDetectDevice() async {
     try {
       const platform = MethodChannel('com.voltmatch/hardware');
@@ -74,7 +81,6 @@ class _SelectionScreenState extends State<SelectionScreen> {
 
       DeviceModel? matched;
 
-      // 1. Search through the MobileModels modelCodes mapping
       for (var d in CatalogService.devices) {
         if (d.modelCodes.any((code) => model.contains(code.toLowerCase()) || device.contains(code.toLowerCase()))) {
           matched = d;
@@ -82,7 +88,6 @@ class _SelectionScreenState extends State<SelectionScreen> {
         }
       }
 
-      // 2. Fallback check by name or manufacturer
       if (matched == null) {
         for (var d in CatalogService.devices) {
           final dName = d.name.toLowerCase();
@@ -98,6 +103,7 @@ class _SelectionScreenState extends State<SelectionScreen> {
         setState(() {
           selectedDeviceBrand = matched!.manufacturer;
           deviceSearchQuery = '';
+          _recomputeFilteredDevices();
           selectedDevice = matched;
         });
 
@@ -105,10 +111,10 @@ class _SelectionScreenState extends State<SelectionScreen> {
           SnackBar(
             content: Text('✨ Auto-Detected: ${matched.name} (${info['model']})'),
             backgroundColor: const Color(0xFF22BFA2),
+            duration: const Duration(seconds: 2),
           ),
         );
       } else {
-        // Device not yet in catalog: auto pre-fill custom device
         final fullName = info['fullName'] ?? 'My Device';
         final autoDevice = DeviceModel(
           id: 'autodetect_${DateTime.now().millisecondsSinceEpoch}',
@@ -128,6 +134,8 @@ class _SelectionScreenState extends State<SelectionScreen> {
         setState(() {
           CatalogService.devices.insert(0, autoDevice);
           selectedDeviceBrand = 'All Brands';
+          _buildBrandCaches();
+          _recomputeFilteredDevices();
           selectedDevice = autoDevice;
         });
 
@@ -135,6 +143,7 @@ class _SelectionScreenState extends State<SelectionScreen> {
           SnackBar(
             content: Text('Detected: $fullName (Added to list)'),
             backgroundColor: const Color(0xFF22BFA2),
+            duration: const Duration(seconds: 2),
           ),
         );
       }
@@ -196,6 +205,8 @@ class _SelectionScreenState extends State<SelectionScreen> {
               );
               setState(() {
                 CatalogService.devices.add(newDevice);
+                _buildBrandCaches();
+                _recomputeFilteredDevices();
                 selectedDevice = newDevice;
               });
               Navigator.pop(ctx);
@@ -257,6 +268,8 @@ class _SelectionScreenState extends State<SelectionScreen> {
               );
               setState(() {
                 CatalogService.chargers.add(newCharger);
+                _buildBrandCaches();
+                _recomputeFilteredChargers();
                 selectedCharger = newCharger;
               });
               Navigator.pop(ctx);
@@ -315,7 +328,6 @@ class _SelectionScreenState extends State<SelectionScreen> {
                 ),
                 child: Column(
                   children: [
-                    // PROMINENT 1-TAP AUTO-DETECT BUTTON (Zero Overflow)
                     InkWell(
                       onTap: _autoDetectDevice,
                       borderRadius: BorderRadius.circular(10),
@@ -355,7 +367,7 @@ class _SelectionScreenState extends State<SelectionScreen> {
                         contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 10),
                         border: OutlineInputBorder(),
                       ),
-                      items: deviceBrands.map((b) {
+                      items: _cachedDeviceBrands.map((b) {
                         return DropdownMenuItem(
                           value: b,
                           child: Text(b, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 14)),
@@ -365,12 +377,14 @@ class _SelectionScreenState extends State<SelectionScreen> {
                         if (val != null) {
                           setState(() {
                             selectedDeviceBrand = val;
-                            if (filteredDevices.isNotEmpty) selectedDevice = filteredDevices[0];
+                            _recomputeFilteredDevices();
+                            if (_cachedDevices.isNotEmpty) selectedDevice = _cachedDevices[0];
                           });
                         }
                       },
                     ),
                     const SizedBox(height: 12),
+
                     // Search Filter
                     TextField(
                       decoration: const InputDecoration(
@@ -379,22 +393,31 @@ class _SelectionScreenState extends State<SelectionScreen> {
                         contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 10),
                         border: OutlineInputBorder(),
                       ),
-                      onChanged: (text) => setState(() => deviceSearchQuery = text),
+                      onChanged: (text) {
+                        setState(() {
+                          deviceSearchQuery = text;
+                          _recomputeFilteredDevices();
+                          if (_cachedDevices.isNotEmpty && !_cachedDevices.contains(selectedDevice)) {
+                            selectedDevice = _cachedDevices[0];
+                          }
+                        });
+                      },
                     ),
                     const SizedBox(height: 12),
+
                     // Model Dropdown
                     DropdownButtonFormField<DeviceModel>(
                       isExpanded: true,
-                      value: filteredDevices.contains(selectedDevice)
+                      value: _cachedDevices.contains(selectedDevice)
                           ? selectedDevice
-                          : (filteredDevices.isNotEmpty ? filteredDevices[0] : null),
+                          : (_cachedDevices.isNotEmpty ? _cachedDevices[0] : null),
                       dropdownColor: const Color(0xFF161D23),
                       decoration: const InputDecoration(
                         labelText: 'Model / Variant',
                         contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 10),
                         border: OutlineInputBorder(),
                       ),
-                      items: filteredDevices.map((d) {
+                      items: _cachedDevices.map((d) {
                         return DropdownMenuItem(
                           value: d,
                           child: Text(d.name, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 14)),
@@ -439,7 +462,7 @@ class _SelectionScreenState extends State<SelectionScreen> {
                         contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 10),
                         border: OutlineInputBorder(),
                       ),
-                      items: chargerBrands.map((b) {
+                      items: _cachedChargerBrands.map((b) {
                         return DropdownMenuItem(
                           value: b,
                           child: Text(b, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 14)),
@@ -449,7 +472,8 @@ class _SelectionScreenState extends State<SelectionScreen> {
                         if (val != null) {
                           setState(() {
                             selectedChargerBrand = val;
-                            if (filteredChargers.isNotEmpty) selectedCharger = filteredChargers[0];
+                            _recomputeFilteredChargers();
+                            if (_cachedChargers.isNotEmpty) selectedCharger = _cachedChargers[0];
                           });
                         }
                       },
@@ -462,21 +486,29 @@ class _SelectionScreenState extends State<SelectionScreen> {
                         contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 10),
                         border: OutlineInputBorder(),
                       ),
-                      onChanged: (text) => setState(() => chargerSearchQuery = text),
+                      onChanged: (text) {
+                        setState(() {
+                          chargerSearchQuery = text;
+                          _recomputeFilteredChargers();
+                          if (_cachedChargers.isNotEmpty && !_cachedChargers.contains(selectedCharger)) {
+                            selectedCharger = _cachedChargers[0];
+                          }
+                        });
+                      },
                     ),
                     const SizedBox(height: 12),
                     DropdownButtonFormField<ChargerModel>(
                       isExpanded: true,
-                      value: filteredChargers.contains(selectedCharger)
+                      value: _cachedChargers.contains(selectedCharger)
                           ? selectedCharger
-                          : (filteredChargers.isNotEmpty ? filteredChargers[0] : null),
+                          : (_cachedChargers.isNotEmpty ? _cachedChargers[0] : null),
                       dropdownColor: const Color(0xFF161D23),
                       decoration: const InputDecoration(
                         labelText: 'Charger Model / Wattage',
                         contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 10),
                         border: OutlineInputBorder(),
                       ),
-                      items: filteredChargers.map((c) {
+                      items: _cachedChargers.map((c) {
                         return DropdownMenuItem(
                           value: c,
                           child: Text(c.name, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 14)),
